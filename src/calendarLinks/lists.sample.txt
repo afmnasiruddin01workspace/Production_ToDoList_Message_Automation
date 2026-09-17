@@ -1,0 +1,4 @@
+# One Google Calendar ID per line. Copy this file to lists.txt and put real IDs there (lists.txt is git-ignored).
+# Find the ID: Google Calendar → Settings → <calendar> → Integrate calendar → Calendar ID
+example-production-team@group.calendar.google.com
+example-maintenance@group.calendar.google.com

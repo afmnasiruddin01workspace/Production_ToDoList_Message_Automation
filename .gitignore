@@ -1,0 +1,31 @@
+# --- Work-in-progress plans (only stable plans are published) ---
+plan/draftMD/*
+!plan/draftMD/.gitkeep
+plan/testMD/*
+!plan/testMD/.gitkeep
+
+# --- Private data (commit the *.sample.* versions instead) ---
+src/calendarLinks/lists.txt
+src/messageListNDetails/WhatsappContacts.txt
+
+# --- Skill outputs (real names / events / send logs) ---
+outputs/**/*
+!outputs/**/
+!outputs/**/.gitkeep
+!outputs/**/*.sample.json
+!outputs/**/*.sample.md
+
+# --- Incidents: only sanitized copies are committed ---
+docs/incidents/*
+!docs/incidents/.gitkeep
+!docs/incidents/*.sanitized.md
+
+# --- Secrets & local settings ---
+.env
+.env.*
+.claude/settings.local.json
+
+# --- OS / editor ---
+Thumbs.db
+.DS_Store
+.vscode/
