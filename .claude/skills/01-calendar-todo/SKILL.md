@@ -5,7 +5,7 @@ description: Pull Google Calendar events and tasks from the calendars in src/cal
 
 # 01 — Calendar ToDo by Person
 
-Source of truth: `plan/stableMD/01-calendar-todo.stable.md` (v0.1). This skill is a summary of its §7 Steps — if they ever disagree, the stable plan wins and this file needs updating.
+Source of truth: `plan/stableMD/01-calendar-todo.stable.md` (v2.0). This skill is a summary of its §7 Steps — if they ever disagree, the stable plan wins and this file needs updating.
 
 ## When to use
 Run this at the start of the pipeline, before module 02 (whatsapp-message). Re-run any time you need a fresh to-do snapshot; it always overwrites the previous output.
@@ -25,8 +25,7 @@ Run this at the start of the pipeline, before module 02 (whatsapp-message). Re-r
 6. **Map each item** —
    - `type`: `"task"` if `description` contains `tasks.google.com/task/`, else `"event"`.
    - `title`: the raw `summary`.
-   - `start` / `end`: `dateTime` if present, else `date`.
-   - `calendar`: the display name from step 3.
+   - Also keep the item's `start` (from `dateTime` or `date`) and `calendar` (the display name from step 3) internally — `start` drives step 8's sort, `calendar` drives step 10's summary. Neither is ever written to the output.
 
 7. **Find the group(s)** for each item —
    - Find every `(...)` group in the title. For each: trim it, strip a leading `From `/`By ` (case-insensitive), split on `,`, trim each part, and look it up (case-insensitive) against the persons map from step 2.
@@ -35,11 +34,11 @@ Run this at the start of the pipeline, before module 02 (whatsapp-message). Re-r
    - If none matched **and** `type` is `"task"` → the item belongs to `"A F M Nasir Uddin"` (owner fallback — the module can't tell which Tasks list an item is from, so an unnamed task is assumed to be the user's own).
    - If none matched and it's an `"event"` → `"No Name"`.
 
-8. **Group and sort** — sort each group's items by (`start`, `title`). Sort the group keys A→Z (case-insensitive), with `"No Name"` always last.
+8. **Group and sort** — sort each group's items by (internal `start`, `title`). Sort the group keys A→Z (case-insensitive), with `"No Name"` always last.
 
-9. **Write outputs** —
-   - `outputs/01-calendar-todo/todo_by_name.json`: `{ "<group>": [ {type, title, start, end, calendar}, ... ] }`, UTF-8, 2-space indent, non-ASCII characters kept as-is (don't escape Bengali text). No items anywhere → write `{}` (this is not an error).
-   - `outputs/01-calendar-todo/todo_by_name.md`: one `## <group>` heading per group in the same order, numbered list `N. [type] title — start → end`.
+9. **Write outputs** — drop the internal `start`/`end` and `calendar` before writing; the output never contains a date, time, or calendar name.
+   - `outputs/01-calendar-todo/todo_by_name.json`: `{ "<group>": [ {type, title}, ... ] }`, UTF-8, 2-space indent, non-ASCII characters kept as-is (don't escape Bengali text). No items anywhere → write `{}` (this is not an error).
+   - `outputs/01-calendar-todo/todo_by_name.md`: one `## <group>` heading per group in the same order, numbered list `N. [type] title`.
    - Both files overwrite whatever was there before.
 
 10. **Print a run summary** — items fetched per calendar, items per group, any failed calendars, any skipped holiday calendars.

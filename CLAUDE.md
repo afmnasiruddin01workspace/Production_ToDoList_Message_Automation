@@ -29,7 +29,7 @@ Never skip a gate. Never promote without explicit user approval.
 - A task-type item (has a `tasks.google.com/task/` link in its description) with no matched name → group `"A F M Nasir Uddin"` instead of `"No Name"` (the module can't tell which Google Tasks list an item is from, so an unnamed task is assumed to be the owner's own).
 - Holiday calendars (ID contains `#holiday@group.v.calendar.google.com`) are never read, even if added to `lists.txt`.
 - Known limitation: some real Google Tasks never come back from the Calendar API's `list_events`, regardless of Tasks list, due date/time, or recurrence — verified directly, no fix available without a separate Google Tasks connector. Accepted for v0.1.
-- Output contains only group name + list of items (type, title, start, end, calendar).
+- Output contains only group name + list of items (type, title). No date, time, or calendar name is output; the item's start and calendar are used internally only (ordering, run summary).
 - Window: **start of today** (00:00:00) → today + 30 days (23:59:59), timezone `Asia/Dhaka`.
 - WhatsApp: Business Cloud API (coexistence). Env vars `WA_PHONE_NUMBER_ID`, `WA_TOKEN`, `WA_MODE` (`dry-run` | `self` | `live`). Never write tokens into files.
 - Module 02 test ladder: `dry-run` → `self` (own number only) → `live`.

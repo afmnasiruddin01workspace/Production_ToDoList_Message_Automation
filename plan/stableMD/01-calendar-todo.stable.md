@@ -2,11 +2,11 @@
 module: calendar-todo
 id: "01"
 phase: stable
-version: "0.1"
+version: "2.0"
 depends_on: []
 input_from: src/calendarLinks/lists.txt + src/messageListNDetails/WhatsappContacts.txt (Person column only)
 output_to: outputs/01-calendar-todo/
-approved_by: A F M Nasir Uddin (2026-09-17 — "are all the testing validations passes? then go")
+approved_by: A F M Nasir Uddin (2026-09-17 — "ok, promote to stable")
 date: 2026-09-17
 ---
 
@@ -30,28 +30,28 @@ Collect every Google Calendar event and Google Task for today through today + 30
 ## 4. Outputs (contract for next module)
 | Name | Path | Format | Schema |
 |---|---|---|---|
-| ToDo by person | `outputs/01-calendar-todo/todo_by_name.json` | json | Object: key = group name (canonical `Person` value or `"No Name"`); value = array of items `{type, title, start, end, calendar}` sorted by `start` then `title` |
-| Human view | `outputs/01-calendar-todo/todo_by_name.md` | md | One `## <group>` heading per group, numbered list `N. [type] title — start → end` |
+| ToDo by person | `outputs/01-calendar-todo/todo_by_name.json` | json | Object: key = group name (canonical `Person` value or `"No Name"`); value = array of items `{type, title}`, ordered chronologically (by the item's own start time, computed internally but never output) then by title |
+| Human view | `outputs/01-calendar-todo/todo_by_name.md` | md | One `## <group>` heading per group, numbered list `N. [type] title` |
 
 Field rules:
 - `type`: `"task"` if `description` contains `tasks.google.com/task/`, otherwise `"event"`.
 - `title`: the full `summary`, unchanged.
-- `start` / `end`: ISO 8601 with `+06:00` for timed items; `YYYY-MM-DD` for all-day items.
-- `calendar`: the calendar `summary` (display name) returned by `list_calendars`.
+- **No date or time is output.** `start` is still read from the item and used only to sort — it is never written to `todo_by_name.json` or `todo_by_name.md` (user decision, 2026-09-17).
+- **No calendar name is output either** (user decision, 2026-09-17). The calendar name from `list_calendars` is still used internally in the run summary (§7 step 10) to report item counts per calendar — it just never reaches the item object.
 - Owner fallback: this module cannot tell which Google Tasks list an item belongs to (see the limitation below), so it cannot detect "your own" tasks by list. Instead, any `type: "task"` item with no known name in the title is assumed to be yours: the group is `"A F M Nasir Uddin"` instead of `"No Name"`.
 - Groups are sorted A→Z, with `"No Name"` last. No items in the window → `{}` (this is not an error).
 
 ```json
 {
   "Alice": [
-    {"type": "task", "title": "Machine condition check (Alice)", "start": "2026-09-17T13:00:00+06:00", "end": "2026-09-17T13:30:00+06:00", "calendar": "calendar #1"},
-    {"type": "task", "title": "Gate design for workshop (Bob,Alice)", "start": "2026-09-21T11:00:00+06:00", "end": "2026-09-21T11:30:00+06:00", "calendar": "calendar #1"}
+    {"type": "task", "title": "Machine condition check (Alice)"},
+    {"type": "task", "title": "Gate design for workshop (Bob,Alice)"}
   ],
   "Bob": [
-    {"type": "task", "title": "Gate design for workshop (Bob,Alice)", "start": "2026-09-21T11:00:00+06:00", "end": "2026-09-21T11:30:00+06:00", "calendar": "calendar #1"}
+    {"type": "task", "title": "Gate design for workshop (Bob,Alice)"}
   ],
   "No Name": [
-    {"type": "task", "title": "Land Tax works", "start": "2026-09-23T11:00:00+06:00", "end": "2026-09-23T11:30:00+06:00", "calendar": "calendar #1"}
+    {"type": "task", "title": "Land Tax works"}
   ]
 }
 ```
@@ -79,10 +79,10 @@ Field rules:
 | R3 | A name is taken from a `(...)` group in the title only if, after trimming, removing a leading `From ` / `By ` (case-insensitive), and splitting on `,`, the part matches a `Person` value (case-insensitive, trimmed). The output key is the `Person` value exactly as written in the contacts file. |
 | R4 | A title with several matching names (in one or more `(...)` groups) is listed under each matched person, once per person. |
 | R5 | A title with no matching name (no parentheses, or only non-name parentheses such as dates, codes or Bengali words) goes to `"No Name"`, unless R11 applies. |
-| R6 | Each item has exactly these fields: `type`, `title`, `start`, `end`, `calendar`, with `type` set as described in §4. No IDs, descriptions, attendees, emails or phone numbers are output. |
+| R6 | Each item has exactly these fields: `type`, `title`, with `type` set as described in §4. No IDs, descriptions, attendees, emails, phone numbers, dates, times or calendar names are output. |
 | R7 | If one calendar fails (404, permission error), the error is shown in the run summary and the other calendars are still processed; the files are still written. |
 | R8 | Recurring events show up as one item per date in the window. |
-| R9 | The output is the same on repeated runs over the same data: groups A→Z with `"No Name"` last, and items sorted by `start` then `title`. |
+| R9 | The output is the same on repeated runs over the same data: groups A→Z with `"No Name"` last, and items ordered by the item's start time (computed internally, not output) then by title. |
 | R10 | `.md` and `.json` contain the same groups and item counts. |
 | R11 | If a `type: "task"` item has no known name in the title, the item goes to the group `"A F M Nasir Uddin"` instead of `"No Name"` (this module cannot detect Tasks-list membership, so it assumes any unnamed task is the owner's). If a known name is found, the item goes only to the names found (task or not). |
 | R12 | Holiday calendars are skipped: any calendar whose ID contains `#holiday@group.v.calendar.google.com` is dropped in step 1 and reported as "skipped (holiday)" in the run summary. No holiday item appears in the output. |
@@ -93,10 +93,10 @@ Field rules:
 3. **Resolve calendar names** — MCP `list_calendars` → map `id → summary`. An ID not in the list is marked as failed (R7), with its ID shown in the summary.
 4. **Compute the window** (R2): `startTime = <today>T00:00:00+06:00`, `endTime = <today+30>T23:59:59+06:00`, where today is the current date in Asia/Dhaka.
 5. **Fetch items** (R2, R7, R8): for each calendar, call MCP `list_events` with `calendarId`, `startTime`, `endTime`, `timeZone: "Asia/Dhaka"`, `orderBy: "startTime"`, `pageSize: 250`, `eventType: ["DEFAULT","FOCUS_TIME"]`. Follow `nextPageToken` until there are no more pages. Skip items with `status: "cancelled"`. If one calendar errors, record it and continue.
-6. **Map items** (R6): `type` = `"task"` if `description` contains `tasks.google.com/task/`, otherwise `"event"`. `start`/`end` = `dateTime` if present, otherwise `date`. `calendar` = the name from step 3.
+6. **Map items** (R6): `type` = `"task"` if `description` contains `tasks.google.com/task/`, otherwise `"event"`. Also keep the item's `start` (from `dateTime` or `date`) and `calendar` (the name from step 3) internally — `start` drives step 8's sort, `calendar` drives step 10's summary; both are dropped before step 9's write, and neither ever appears in the output.
 7. **Find names** (R3, R4, R5, R11): regex `\(([^()]*)\)` over the title → for each group: trim, remove a leading `^(from|by)\s+` (case-insensitive), split on `,`, trim each part, look up in the persons map. Collect the unique canonical names in order of appearance. If none match → `["A F M Nasir Uddin"]` if `type` is `"task"` (R11 — assume an unnamed task is the owner's); otherwise → `["No Name"]`.
-8. **Group and sort** (R4, R9): add the item to each group found → sort items by (`start`, `title`) → sort group keys A→Z with `"No Name"` last.
-9. **Write outputs** (R10): write `outputs/01-calendar-todo/todo_by_name.json` (UTF-8, 2-space indent, `ensure_ascii` off so Bengali text stays readable) and `todo_by_name.md` from the same data. Overwrite the previous run.
+8. **Group and sort** (R4, R9): add the item to each group found → sort items by (internal `start`, `title`) → sort group keys A→Z with `"No Name"` last.
+9. **Write outputs** (R6, R10): drop the internal `start`/`end` and `calendar` fields, keeping only `{type, title}` per item → write `outputs/01-calendar-todo/todo_by_name.json` (UTF-8, 2-space indent, `ensure_ascii` off so Bengali text stays readable) and `todo_by_name.md` from the same data. Overwrite the previous run.
 10. **Print summary** (R7, R12): items per calendar, items per group, failed calendars, skipped holiday calendars.
 
 Configuration / environment variables:
@@ -115,7 +115,7 @@ Configuration / environment variables:
 - [x] No secrets or real phone numbers written in this file
 - [x] §12 Troubleshooting filled for known failure points
 
-Validation result: pass (re-checked after the "My Tasks only" theory was disproved and replaced with the verified coverage-gap finding) — checked by Claude on 2026-09-17 — approved by user: yes (2026-09-17)
+Validation result: pass (re-checked for v2.0 — calendar removed from §4 output contract, R6 reworded, steps 6/9 updated) — checked by Claude on 2026-09-17 — approved by user: yes (2026-09-17)
 
 ## 9. Test Cases
 | ID | Covers | Input / Setup | Expected | Result | Evidence |
@@ -124,19 +124,19 @@ Validation result: pass (re-checked after the "My Tasks only" theory was disprov
 | T2 | R2 | Real run; compare with Google Calendar UI for 00:00 today → today+30 | Same item count as the UI; an item earlier today is included; nothing after today+30 | pass, with a documented gap | Window logic verified against fixtures (yesterday/today/today+30/UTC conversion all correct). The connector returns 21 DEFAULT/FOCUS_TIME items for calendar #1 in this window — matches the module's own count exactly. The user counted more (29+) in the Calendar UI; the difference is (a) "Office" WORKING_LOCATION banners and a holiday overlay, both excluded by design (§5, R12), and (b) an unpredictable Calendar-API coverage gap — some real tasks never come back from `list_events` under any query (confirmed with 4 real titles across 3 different Tasks lists), while other tasks in the very same lists are returned. No consistent rule was found; this is a Calendar-API limitation, not a bug in this module — see §5 Scope and §10 Risks. User accepted this gap for v0.1. |
 | T3 | R3 | Titles like `(From Alice)`, `-(Alice da)` where the `Person` value is `Alice da`, `(alice)` | Grouped under the canonical `Person` spelling | pass | `(From Alice)`, `(alice)`, `(By BOB )` → canonical `Alice` / `Bob`; `-(Alice da)` → `Alice da` |
 | T4 | R4 | Title `(Bob,Alice)` and title `(Alice) (SOP, HT)` | First under both Bob and Alice; second only under Alice | pass | `(Bob,Alice)` under both; `(Alice) (SOP, HT)` only under Alice; `(Alice)(alice)` listed once. Real: `(Sajib,Rabbani)` → Rabbani, `(Mamun) (SOP, HT)` → Mamun |
-| T5 | R5 | Titles with no parentheses, `(Emailed on 22Aug26)`, a Bengali word in parentheses | All in `"No Name"` | pass | Fixture: no parens, `(Emailed on 22Aug26)`, Bengali word, unknown name → No Name. Real: no items left in No Name after R11 fix (all were tasks → owner) |
-| T6 | R6 | Real run | Every item has exactly 5 keys; `type` = `task` for Tasks and `event` for the recurring meeting; no `@` or phone digits in the output | pass | Real run: every item has exactly 5 keys; Tasks = `task`, recurring meeting = `event`; no `@` in titles and no 10+ digit runs in the json |
+| T5 | R5 | Titles with no parentheses, `(Emailed on 22Aug26)`, a Bengali word in parentheses | All in `"No Name"` | pass | Test gap found and fixed during test-phase re-run: all earlier no-name fixture items were `task`-type, so only R11 (owner fallback) was actually exercised, not R5 itself. Added an `event`-type item with no name → confirmed it lands in `"No Name"`, sorted last after all named groups. Real run: no `event`-type items with no name exist in the current data (all no-name items are tasks → owner) |
+| T6 | R6 | Real run | Every item has exactly 2 keys (`type`, `title`) — no `start`/`end`/date/time/calendar anywhere in the output; `type` = `task` for Tasks and `event` for the recurring meeting; no `@` or phone digits | pass | Test-phase re-run: real (21 items) and synthetic (25 items, 5 groups) both confirm `sorted(item.keys()) == ['title','type']` for every item; hash f3461ee1… |
 | T7 | R7 | Scratch `lists.txt` with one invalid ID added | Invalid ID shown as failed; valid calendar items still written | pass | Bad ID → `FAILED calendar …: The requested event could not be found or has been deleted.` (real connector message); the other calendars were still written |
 | T8 | R8 | Real run | The recurring meeting shows up once per date in the window | pass | Real run: monthly meeting appears once, on 2026-10-07 (only date in the window); connector already splits repeats |
-| T9 | R9 | Run twice with no calendar changes | Both json files are byte-identical; `"No Name"` last | pass | Two runs → identical sha256; `No Name` last (when present) |
-| T10 | R10 | Real run | Group and item counts in md = json | pass | Real run: md headings = json keys in the same order; 21 items in both |
+| T9 | R9 | Run twice with no calendar changes | Both json files are byte-identical; `"No Name"` last; order still chronological even without start/end in the output | pass | Two runs → identical sha256 `6875e2394ae6cef5…`; internal start still drives order though it's not in the output |
+| T10 | R10 | Real run | Group and item counts in md = json; md line format is `N. [type] title`, no date/time/calendar | pass | Real run: md format `N. [type] title` confirmed, e.g. `1. [task] Free size Inner (গেন্জি) কিনা worker`; 21 items in both, no date/time/calendar in either file |
 | T11 | R1, R2 | Calendar with 0 items (calendar #2 only) | `{}` written, no error | pass | Real calendar #2 had 0 items; empty-only list → `{}`, no error |
 | T12 | R11 | Real run: 5 no-name Tasks (e.g. "Land Tax works") now grouped as owner. Synthetic: (a) task, no name; (b) task, `(Alice)` in title; (c) task, no name, plain description with no special text | (a) → `A F M Nasir Uddin`; (b) → `Alice` only; (c) → `A F M Nasir Uddin` (type-based, not text-based) | pass | real/out3/todo_by_name.json (owner group has 5 items) + syn/out2/todo_by_name.json |
 | T13 | R12 | Scratch `lists.txt` with the Bangladesh holiday calendar ID added | That calendar shows as "skipped (holiday)"; no holiday items in the output; other calendars processed normally | pass | Holiday ID in scratch lists.txt → `skipped (holiday)`, not fetched; no holiday items in output |
 
 Test data rule: prefer real items that match each pattern. If a pattern has no real example, create a temporary test task and delete it afterwards — **only with user approval**.
 
-Test result: pass, 13/13 (T1–T13) — run on 2026-09-17 — approved by user: yes (2026-09-17)
+Test result: pass, 13/13 (T1–T13) — full test-phase re-run of all fixtures (real: 21 items; synthetic: 25 items across 5 groups, incl. bad calendar, empty calendar, holiday skip) against the v2.0 output format. T6 explicitly re-verified with a hash; all others confirmed unchanged in behavior — run on 2026-09-17 — approved by user: yes (2026-09-17)
 
 ## 10. Risks & Mitigations
 | Risk | Impact | Mitigation |
@@ -153,6 +153,8 @@ Test result: pass, 13/13 (T1–T13) — run on 2026-09-17 — approved by user: 
 | Version | Date | Phase | Change | Reason |
 |---|---|---|---|---|
 | 0.1 | 2026-09-17 | draft | Initial draft | Explore showed titles with non-name `(...)` groups; user chose the known-names rule and a start-of-today window; user added the task-owner fallback for items with no name (R11, T12); user asked to exclude holidays (R12, T13); test run found the fallback text (`My Tasks`) is never in the data — replaced with a type-based rule (R11 rewritten). A first theory ("Calendar API only exposes the default My Tasks list") was tested against more real items and disproved (tasks from Prd-OrderMgt, Prd-SOP and Prod-Costing were all visible); the real, verified finding is an unpredictable Calendar-API coverage gap affecting some tasks regardless of list — documented in §5/§10, user accepted it for v0.1 (T2 re-evidenced) |
+| 1.0 | 2026-09-17 | draft | Removed `start`/`end` (date and time) from the output contract entirely (§4 changed — MAJOR bump per template rule). Items now output as `{type, title, calendar}` only; `start` is still read internally to keep the ordering chronological but is never written. R6, R9 reworded; steps 6, 8, 9 updated; example JSON and md line format updated. T6, T9, T10 reset to pending for re-run | User: "Do not use start and end (date and time). So output file does not have Date and time" |
+| 2.0 | 2026-09-17 | draft | Removed `calendar` from the output contract entirely (§4 changed — MAJOR bump per template rule). Items now output as `{type, title}` only; `calendar` is still used internally in the run summary (§7 step 10) but never written to the item object. R6 reworded; steps 6, 9 updated; example JSON and md line format updated. T6, T10 reset to pending for re-run | User: "Do not use \"calendar\". So output file does not have calendar info" |
 
 ## 12. Troubleshooting & Rollback
 | Symptom | Likely cause | Detect | Fix |
