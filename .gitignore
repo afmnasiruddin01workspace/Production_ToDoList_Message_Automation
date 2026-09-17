@@ -29,3 +29,6 @@ docs/incidents/*
 Thumbs.db
 .DS_Store
 .vscode/
+
+# --- Google OAuth client + token (project-scope, never committed) ---
+.secrets/

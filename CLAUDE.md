@@ -4,7 +4,7 @@ Modular chain of Claude Code skills. Each module's output is the next module's i
 
 | ID | Module | Input | Output |
 |---|---|---|---|
-| 01 | calendar-todo | Google Calendars in `src/calendarLinks/lists.txt` | `outputs/01-calendar-todo/todo_by_name.json` (+ `.md`) |
+| 01 | calendar-todo | Google Tasks (all lists, Tasks API) + Google Calendars in `src/calendarLinks/lists.txt` | `outputs/01-calendar-todo/todo_by_name.json` (+ `.md`) |
 | 02 | whatsapp-message | 01 output + `src/messageListNDetails/WhatsappContacts.txt` | `outputs/02-whatsapp-message/send_log.json` |
 | 03 | scheduler | 01 + 02 skills | TBD in its explore phase |
 
@@ -26,10 +26,13 @@ Never skip a gate. Never promote without explicit user approval.
 
 ## Fixed decisions
 - Person = name inside `()` in event title, but only if it matches the `Person` column in `WhatsappContacts.txt` (case-insensitive; a leading `From `/`By ` is stripped). No match → `"No Name"`. `(A, B)` → listed under each matched name.
-- A task-type item (has a `tasks.google.com/task/` link in its description) with no matched name → group `"A F M Nasir Uddin"` instead of `"No Name"` (the module can't tell which Google Tasks list an item is from, so an unnamed task is assumed to be the owner's own).
+- Tasks come from the Google Tasks API (all lists, open tasks only, due today…today+30). Calendar items with a `tasks.google.com/task/` link are task copies and are dropped. Events come from the Calendar connector.
+- A task with no matched name on the default "My Tasks" list → group `"A F M Nasir Uddin"`. Unnamed tasks on other lists and unnamed events → `"No Name"`.
+- If the Tasks API read fails, the run stops without writing outputs.
+- Google OAuth client + token live only in `.secrets/` (gitignored). Never print or commit them.
 - Holiday calendars (ID contains `#holiday@group.v.calendar.google.com`) are never read, even if added to `lists.txt`.
-- Known limitation: some real Google Tasks never come back from the Calendar API's `list_events`, regardless of Tasks list, due date/time, or recurrence — verified directly, no fix available without a separate Google Tasks connector. Accepted for v0.1.
-- Output contains only group name + list of items (type, title). No date, time, or calendar name is output; the item's start and calendar are used internally only (ordering, run summary).
+- Known limitation: a recurring task shows only its current open instance (Tasks API behavior). Accepted for v3.0.
+- Output contains only group name + list of items (type, title). No date, time, calendar or task-list name is output; they are used internally only (ordering, owner rule, run summary).
 - Window: **start of today** (00:00:00) → today + 30 days (23:59:59), timezone `Asia/Dhaka`.
 - WhatsApp: Business Cloud API (coexistence). Env vars `WA_PHONE_NUMBER_ID`, `WA_TOKEN`, `WA_MODE` (`dry-run` | `self` | `live`). Never write tokens into files.
 - Module 02 test ladder: `dry-run` → `self` (own number only) → `live`.
@@ -43,7 +46,7 @@ Never skip a gate. Never promote without explicit user approval.
 ## Git policy
 - Remote: https://github.com/afmnasiruddin01workspace/Production_ToDoList_Message_Automation (branch `main`).
 - Only stable work is committed: stableMD, skills, docs, samples, CLAUDE.md, CHANGELOG.md, `.gitignore`, `.claude/settings.json`.
-- Never commit: draftMD/testMD, real `lists.txt`, real `WhatsappContacts.txt`, `outputs/` data, `.env`, `settings.local.json`.
+- Never commit: draftMD/testMD, real `lists.txt`, real `WhatsappContacts.txt`, `outputs/` data, `.env`, `.secrets/`, `settings.local.json`.
 - Before each commit run `git diff --cached --name-only` and check for private files.
 - Commit: `feat(NN-module): stable vX.Y`, `fix(NN-module): vX.Y — …`, `revert(NN-module): back to vX.Y`.
 

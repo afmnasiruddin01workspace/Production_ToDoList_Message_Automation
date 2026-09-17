@@ -17,7 +17,15 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | Everything in "No Name" | Titles lack `(Name)`, or use other brackets like `（）` `[]` | Look at raw titles in the MCP response | Fix titles, or add bracket variant to parsing rule (MINOR upgrade) |
 | Name group split in two (e.g. `Rabbani` vs `rabbani `) | Case / extra spaces | Compare group names in output | Normalize: trim + match `Person` column case-insensitively (MINOR) |
 | Missing or extra items | Timezone (UTC vs Asia/Dhaka) or window boundary; recurring events not expanded | Check `timeMin`/`timeMax` used | Use Asia/Dhaka; expand recurring instances |
-| Empty output file | No events in window | Check calendar UI for next 30 days | Expected — output `[]`, not an error |
+| Empty output file | No open tasks or events in window | Check Calendar UI / Tasks board for next 30 days | Expected — output `{}`, not an error |
+| `fetch_tasks: missing …credentials.json` | OAuth client not downloaded | Look in `.secrets/downloads/` and `.secrets/google/` | Create Desktop OAuth client in Google Cloud Console; save JSON into `.secrets/downloads/` |
+| `invalid_grant` / token expired or revoked | Refresh token expired (External + Testing app: 7 days) or access revoked | stderr of `fetch_tasks.py` | Delete `.secrets/google/token.json`, run again and sign in; use Internal/published consent screen |
+| HTTP 403 `accessNotConfigured` | Google Tasks API not enabled | stderr | APIs & Services → Library → enable Google Tasks API |
+| `access_denied` in browser sign-in | Account not a test user (External + Testing) | Browser error page | OAuth consent screen → Test users → add the account |
+| `ModuleNotFoundError: googleapiclient` | Python packages missing | stderr | `python -m pip install --user google-api-python-client google-auth-oauthlib` |
+| A task appears twice | Calendar task-copy marker changed | Raw event `description` | Update the marker in skill step 6 (MINOR) |
+| Owner's unnamed task in "No Name" | Task is on a list other than "My Tasks" | Tasks board | Expected — move to My Tasks or add a name |
+| A task is missing | Completed, no due date, overdue, beyond +30 days, or future repeat of a recurring task | Tasks board | Expected per plan §5 |
 
 ## 02-whatsapp-message
 | Symptom | Likely cause | How to check | Fix |
