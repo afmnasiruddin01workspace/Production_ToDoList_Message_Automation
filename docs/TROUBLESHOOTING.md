@@ -28,17 +28,23 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | A task is missing | Completed, no due date, overdue, beyond +30 days, or future repeat of a recurring task | Tasks board | Expected per plan §5 |
 
 ## 02-whatsapp-message
+**v1.0: WhatsApp Web linked-device automation** (`whatsapp-web.js`), not the Meta Cloud API — see `plan/stableMD/02-whatsapp-message.stable.md` §12 for full detail and the real incidents this table summarizes.
+
 | Symptom | Likely cause | How to check | Fix |
 |---|---|---|---|
-| Error `190` / HTTP 401 | Access token expired or invalid | Error body `error.code` | New token (System User permanent token recommended); update `WA_TOKEN` |
-| Error `131047` | Outside 24-hour customer window — free text not allowed | Error body | Send approved template message instead |
-| Error `132001` | Template name / language wrong or not approved | WhatsApp Manager → Templates | Use exact approved name + language code |
-| Error `131026` | Number not on WhatsApp or wrong format | Contacts row | Use E.164 digits only: `8801678xxxxxx` (no `+`, spaces, dashes) |
-| Error `130429` / `131056` | Rate limit | Error body | Delay between sends; retry with backoff; unsent rows stay in `send_log.json` |
-| Duplicate messages | Re-run after partial failure | `send_log.json` for today | Skill must skip persons with `status: sent` today |
-| Person not messaged | Group name not in contacts, or group is "No Name" | Report section of send log | Expected behavior — add contact or fix event title |
-| Business app stopped receiving | Coexistence onboarding issue | Meta Business Manager → phone number status | Resolve in Meta; set `WA_MODE=dry-run` meanwhile |
-| Sent to everyone during testing | `WA_MODE` was `live` | Env var | Always test with `self`; incident + hotfix |
+| A QR code appears every run | Session folder missing/deleted, or was never fully linked | `.secrets/wweb-auth/` missing or empty | Scan again from the phone with the business number; leave the folder alone afterward |
+| Run stops: `auth-timeout` | Nobody scanned the QR within `WA_QR_TIMEOUT` | stderr reason | Re-run with the phone in hand: WhatsApp → Settings → Linked devices → Link a device |
+| Run stops: `sender-mismatch` | The scan linked the wrong WhatsApp account, or `WA_SENDER_NUMBER` is wrong | stderr shows the masked linked number vs. expected | Unlink the wrong account from its phone, re-scan with the correct one, or fix `WA_SENDER_NUMBER` |
+| `Execution context was destroyed`, at launch or mid-session, even on a fresh scan | Installed Chrome is much newer than Puppeteer/`whatsapp-web.js`'s pinned protocol version | Compare Chrome's version to the pinned `whatsapp-web.js`/Puppeteer versions in `package.json` | Already mitigated with `protocolTimeout` + extra launch args in `wa_send.js`; if it recurs, try `WA_HEADFUL=1` or an older Chrome build |
+| Same error, but happens on *every* run including a brand-new session | `.secrets/wweb-auth/` is corrupted (usually from a scan that was interrupted partway) | A clean, empty session folder launches without error | Delete `.secrets/wweb-auth/` entirely and re-link with a fresh QR scan |
+| A send is logged `failed` with `Cannot read properties of undefined ('id')`, but it actually arrived | `sendMessage()` can resolve without a usable id even on success (library/WhatsApp Web version drift) | Compare the log to the phone | Already fixed — a missing id is recorded as `"unconfirmed"`, not `failed` |
+| The last person in a run never gets their message, though everyone before them does | No trailing pacing delay after the last send before the browser closes | Reproducible: always the alphabetically-last recipient | Already fixed — a 5 s settle delay runs before `client.destroy()` |
+| A `self`-mode test run seems to block a same-day `live` send (`already_sent`) | Idempotency check used to ignore run `mode` | `send_log.json` shows a `mode: "self"` `sent` entry for today | Already fixed — idempotency only counts `mode: "live"` entries |
+| Duplicate message arrives | Log file deleted or the date rolled over mid-run | Compare `send_log.json` entries for the date | Keep the log; re-runs rely on it |
+| Person not messaged though items exist | `Send days` excludes today, no contact row, or the run hit `WA_MAX_PER_RUN` | Log status `skipped_day` / `skipped_no_contact` / `skipped_over_cap` | Edit `Send days`, add the contact row, or raise the cap |
+| Refuses to start | `WA_MODE` missing, empty, or unrecognized | stderr | Set `WA_MODE` to `dry-run`, `self`, or `live` in `.secrets/whatsapp.env` |
+| Stale module 01 output | Module 01 wasn't run today | stderr shows the file's date | Run skill `01-calendar-todo` first |
+| **WhatsApp warns or blocks the number** | Automated sending detected (this is against WhatsApp's terms, a known and accepted risk) | Business app shows a warning | Stop immediately (`WA_MODE=dry-run`), unlink the device, write an incident under `docs/incidents/`, send by hand until decided otherwise |
 
 ## 03-scheduler
 _To be filled during its explore/plan phase._

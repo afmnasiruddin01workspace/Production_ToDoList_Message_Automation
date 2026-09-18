@@ -34,7 +34,7 @@ Never skip a gate. Never promote without explicit user approval.
 - Known limitation: a recurring task shows only its current open instance (Tasks API behavior). Accepted for v3.0.
 - Output contains only group name + list of items (type, title). No date, time, calendar or task-list name is output; they are used internally only (ordering, owner rule, run summary).
 - Window: **start of today** (00:00:00) → today + 30 days (23:59:59), timezone `Asia/Dhaka`.
-- WhatsApp: Business Cloud API (coexistence). Env vars `WA_PHONE_NUMBER_ID`, `WA_TOKEN`, `WA_MODE` (`dry-run` | `self` | `live`). Never write tokens into files.
+- WhatsApp: **v1.0 — linked-device automation** (`whatsapp-web.js` driving a real Chrome browser), not the Meta Cloud API — the owner's Facebook account is restricted, so no developer token can ever be issued. No token exists in this design. Settings live in `.secrets/whatsapp.env` (`WA_MODE` (`dry-run`\|`self`\|`live`), `WA_SENDER_NUMBER`, `WA_TEST_NUMBER`, `WA_MIN_DELAY`/`WA_MAX_DELAY`, `WA_MAX_PER_RUN`, optional `WA_CHROME_PATH`); the linked session lives in `.secrets/wweb-auth/` (gitignored), created by a one-time QR scan. This is not an officially supported interface — WhatsApp's terms permit only the Business API for automated sending — so volume is kept small (one message per person per scheduled day, capped per run) and the risk was accepted by the user on 2026-09-18.
 - Module 02 test ladder: `dry-run` → `self` (own number only) → `live`.
 - Messages in English, numbered list per person.
 

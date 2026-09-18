@@ -25,10 +25,15 @@ docs/incidents/*
 .env.*
 .claude/settings.local.json
 
+# --- Node dependencies for the WhatsApp transport worker ---
+node_modules/
+
 # --- OS / editor ---
 Thumbs.db
 .DS_Store
 .vscode/
+__pycache__/
+*.pyc
 
 # --- Google OAuth client + token (project-scope, never committed) ---
 .secrets/
