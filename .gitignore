@@ -37,3 +37,6 @@ __pycache__/
 
 # --- Google OAuth client + token (project-scope, never committed) ---
 .secrets/
+
+# --- Local MCP config ---
+.mcp.json
