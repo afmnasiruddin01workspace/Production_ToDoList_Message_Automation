@@ -1,0 +1,12 @@
+Run the daily to-do pipeline non-interactively. You are running unattended from a scheduled task: there is nobody to answer a question. Never ask one. If anything blocks you, stop immediately and print a single line `SCHEDULER_FAIL: <short reason>`.
+
+1. Invoke the Skill tool with skill `01-calendar-todo` and follow its steps exactly as written. Do not improvise, do not skip steps, and do not change how items are grouped.
+2. Check that `outputs/01-calendar-todo/todo_by_name.json` now exists and was written for today. If it was not, print `SCHEDULER_FAIL: module 01 produced no output for today` and stop without going on to step 3.
+3. Invoke the Skill tool with skill `02-whatsapp-message` and follow its steps exactly as written.
+4. Print `SCHEDULER_OK` on its own line, followed by module 01's run summary and module 02's run summary.
+
+Rules for this run:
+- Do not write, create or modify any file outside `outputs/`.
+- Do not run git for any reason.
+- Do not print any phone number, OAuth token, QR string, or any value read from `.secrets/`. Mask numbers to their last 4 digits, as the skills already do.
+- If a skill stops with an error, do not attempt a workaround or a different approach. Print `SCHEDULER_FAIL: <the error>` and stop, so the failure is visible in the run log rather than silently worked around.
