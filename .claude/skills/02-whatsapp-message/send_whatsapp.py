@@ -27,16 +27,19 @@ EVERY_DAY = {"", "daily", "all", "everyday", "every day"}
 MODES = ("dry-run", "self", "live")
 MAX_BODY = 4000
 # Worker exit reasons that mean "the session is unusable" — the whole run stops (R8, R16).
-ABORT_REASONS = {"auth", "auth-timeout", "sender-mismatch", "launch-failed"}
+ABORT_REASONS = {"auth", "auth-timeout", "sender-mismatch", "launch-failed", "startup-timeout", "send-timeout"}
 DEFAULTS = {"WA_MIN_DELAY": "8", "WA_MAX_DELAY": "25", "WA_MAX_PER_RUN": "10",
             # Empty means "let Puppeteer use its own downloaded Chromium" — its exact
             # protocol version is matched to the pinned puppeteer/whatsapp-web.js
             # versions, which the system's own (possibly much newer) Chrome is not.
             # Set this only to point at a specific browser deliberately.
             "WA_CHROME_PATH": "",
-            "WA_QR_TIMEOUT": "120", "WA_NODE": "node"}
+            "WA_QR_TIMEOUT": "120", "WA_NODE": "node",
+            # v1.2 (R18, R19, R21): every wait on the worker is bounded.
+            "WA_READY_TIMEOUT": "120", "WA_SEND_TIMEOUT": "60", "WA_KILL_MARGIN": "60"}
 SETTINGS = ("WA_MODE", "WA_SENDER_NUMBER", "WA_TEST_NUMBER", "WA_MIN_DELAY", "WA_MAX_DELAY",
-            "WA_MAX_PER_RUN", "WA_CHROME_PATH", "WA_QR_TIMEOUT", "WA_NODE", "WA_WORKER")
+            "WA_MAX_PER_RUN", "WA_CHROME_PATH", "WA_QR_TIMEOUT", "WA_NODE", "WA_WORKER",
+            "WA_READY_TIMEOUT", "WA_SEND_TIMEOUT", "WA_KILL_MARGIN")
 
 
 def fail(msg):
@@ -72,7 +75,8 @@ def load_config(secrets_path):
         fail(f"WA_SENDER_NUMBER is required for mode {mode}. Set it in {secrets_path}.")
     if mode == "self" and not digits(cfg.get("WA_TEST_NUMBER", "")):
         fail("WA_TEST_NUMBER is required for mode 'self'.")
-    for k in ("WA_MIN_DELAY", "WA_MAX_DELAY", "WA_MAX_PER_RUN", "WA_QR_TIMEOUT"):
+    for k in ("WA_MIN_DELAY", "WA_MAX_DELAY", "WA_MAX_PER_RUN", "WA_QR_TIMEOUT",
+              "WA_READY_TIMEOUT", "WA_SEND_TIMEOUT", "WA_KILL_MARGIN"):
         try:
             float(cfg[k])
         except ValueError:
@@ -179,6 +183,18 @@ def split_message(text):
     return [f"{p} ({i}/{len(parts)})" for i, p in enumerate(parts, 1)]
 
 
+def kill_tree(proc):
+    """Kill the worker and everything it started (Chrome). taskkill /T walks the tree on Windows."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_worker(cfg, recipients):
     """Hand the built messages to the node worker and read its result back.
 
@@ -188,7 +204,9 @@ def run_worker(cfg, recipients):
     job = {"mode": cfg["WA_MODE"], "sender": digits(cfg["WA_SENDER_NUMBER"]),
            "auth_dir": AUTH_DIR, "chrome": cfg["WA_CHROME_PATH"],
            "min_delay": float(cfg["WA_MIN_DELAY"]), "max_delay": float(cfg["WA_MAX_DELAY"]),
-           "qr_timeout": float(cfg["WA_QR_TIMEOUT"]), "recipients": recipients}
+           "qr_timeout": float(cfg["WA_QR_TIMEOUT"]),
+           "ready_timeout": float(cfg["WA_READY_TIMEOUT"]),
+           "send_timeout": float(cfg["WA_SEND_TIMEOUT"]), "recipients": recipients}
     fd, job_path = tempfile.mkstemp(prefix="wa_job_", suffix=".json")
     os.close(fd)
     fd, res_path = tempfile.mkstemp(prefix="wa_res_", suffix=".json")
@@ -196,7 +214,19 @@ def run_worker(cfg, recipients):
     try:
         with open(job_path, "w", encoding="utf-8") as fh:
             json.dump(job, fh, ensure_ascii=False)
-        proc = subprocess.run([cfg["WA_NODE"], cfg["WA_WORKER"], job_path, res_path])
+        # R21: a hard ceiling. The worker has its own timers (R18, R19), but a wedged Chrome or an
+        # event loop that never turns would defeat them, and on 2026-09-20/21 an unbounded worker
+        # sat for 10+ minutes. Beyond the ceiling the whole process tree is killed.
+        ceiling = (float(cfg["WA_READY_TIMEOUT"])
+                   + len(recipients) * (float(cfg["WA_SEND_TIMEOUT"]) + float(cfg["WA_MAX_DELAY"]))
+                   + float(cfg["WA_KILL_MARGIN"]))
+        proc = subprocess.Popen([cfg["WA_NODE"], cfg["WA_WORKER"], job_path, res_path])
+        killed = False
+        try:
+            proc.wait(timeout=ceiling)
+        except subprocess.TimeoutExpired:
+            killed = True
+            kill_tree(proc)
         result = {}
         if os.path.exists(res_path):
             try:
@@ -204,6 +234,11 @@ def run_worker(cfg, recipients):
                     result = json.load(fh)
             except json.JSONDecodeError:
                 result = {}
+        if killed:
+            print(f"send_whatsapp: worker killed after {int(ceiling)}s "
+                  f"(last stage: {result.get('stage', 'unknown')})", file=sys.stderr)
+            result["reason"] = "worker-timeout"
+            result["killed_after"] = int(ceiling)
         if not result and proc.returncode != 0:
             fail(f"whatsapp worker exited {proc.returncode} without reporting — nothing was sent.")
         reason = result.get("reason")
@@ -211,7 +246,7 @@ def run_worker(cfg, recipients):
             fail(f"whatsapp session unusable ({reason}) — nothing was sent. See §12 of the plan.")
         return result, reason
     finally:
-        for path in (job_path, res_path):
+        for path in (job_path, res_path, res_path + ".tmp"):
             try:
                 os.remove(path)
             except OSError:
@@ -272,7 +307,9 @@ def main():
         # live run skip a real recipient as already_sent.
         if run.get("date") == str(today) and run.get("mode") == "live":
             for entry in run.get("entries", []):
-                if entry.get("status") in ("sent", "already_sent"):
+                # v1.2 (R19): "unconfirmed" counts as done - a person whose delivery is unknown
+                # must never be re-sent automatically; the owner checks the chat and decides.
+                if entry.get("status") in ("sent", "already_sent", "unconfirmed"):
                     sent_today[entry["person"]] = entry
 
     entries, queue = [], []
@@ -318,9 +355,22 @@ def main():
             if entry.get("status") != "pending":
                 continue
             row = reported.get(entry["person"])
-            if row is None:
+            if row is None and entry["person"] == result.get("in_flight"):
+                # The worker died with this person's send in progress: it may or may not have gone
+                # out, so it is unconfirmed, not failed (R20, R21).
+                entry["status"] = "unconfirmed"
+                entry["error"] = f"worker stopped mid-send ({reason}) - delivery unknown, check the chat"
+            elif row is None:
                 entry["status"] = "failed"
-                entry["error"] = f"worker did not report ({reason})" if reason else "worker did not report"
+                if reason == "send-timeout":
+                    entry["error"] = "not attempted (send-timeout)"
+                elif reason == "worker-timeout":
+                    entry["error"] = f"worker killed after {result.get('killed_after')}s - not attempted"
+                else:
+                    entry["error"] = f"worker did not report ({reason})" if reason else "worker did not report"
+            elif row.get("status") == "unconfirmed":
+                entry["status"] = "unconfirmed"
+                entry["error"] = mask(row.get("error", ""))[:200]
             elif row.get("status") == "ok":
                 ids = [mask(i) for i in row.get("ids", [])]
                 entry["status"] = "sent"
@@ -337,6 +387,7 @@ def main():
         counts[entry["status"]] = counts.get(entry["status"], 0) + 1
     summary = {"sent": counts.get("sent", 0), "dry_run": counts.get("dry-run", 0),
                "failed": counts.get("failed", 0),
+               "unconfirmed": counts.get("unconfirmed", 0),
                "not_registered": counts.get("not_registered", 0),
                "skipped": sum(v for k, v in counts.items()
                               if k.startswith("skipped") or k == "already_sent"),
@@ -347,7 +398,12 @@ def main():
     if sender:
         run["sender_verified"] = sender
     cutoff = str(today - timedelta(days=30))
-    runs = [run] + [r for r in previous if r.get("date") != str(today) and r.get("date", "") >= cutoff]
+    # v1.1: keep every run inside the window, including earlier runs from TODAY. The old filter
+    # also dropped `r["date"] == today`, collapsing each date to one row — so a later dry-run or
+    # self-mode test destroyed the same day's live row. That lost the delivery audit trail and,
+    # because sent_today only counts live rows, re-armed a double-send (R17).
+    # See docs/incidents/2026-09-19-02-whatsapp-message-sendlog-overwrite.md
+    runs = [run] + [r for r in previous if r.get("date", "") >= cutoff]
     os.makedirs(os.path.dirname(args.log), exist_ok=True)
     with open(args.log, "w", encoding="utf-8", newline="\n") as fh:
         json.dump({"runs": runs}, fh, ensure_ascii=False, indent=2)
@@ -365,7 +421,7 @@ def main():
     if reason:
         print(f"  ! worker stopped early: {reason}")
     print(f"log: {args.log}")
-    return 1 if summary["failed"] else 0
+    return 1 if (summary["failed"] or summary["unconfirmed"]) else 0
 
 
 if __name__ == "__main__":

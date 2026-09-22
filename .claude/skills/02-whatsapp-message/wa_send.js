@@ -24,23 +24,45 @@ const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
 const results = [];
 let sender = "";
 let finished = false;
+// v1.2 (R18-R22): every wait in this file is bounded, and the result file always tells the
+// truth about how far the run got, even if this process is killed.
+const READY_TIMEOUT = Number(job.ready_timeout || 120) * 1000;
+const SEND_TIMEOUT = Number(job.send_timeout || 60) * 1000;
+const DESTROY_CAP = 15000;
+let stage = "starting";
+let inFlight = null; // the recipient whose send has started but not yet been recorded
 
 const mask = (v) => String(v || "").replace(/\d{8,}/g, (m) => "****" + m.slice(-4));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const stamp = () => new Date().toTimeString().slice(0, 8);
+// A wedged browser must not be able to hold the exit hostage: cap client.destroy().
+const capped = (p, ms) => Promise.race([Promise.resolve(p).catch(() => {}), sleep(ms)]);
+
+function setStage(s) {
+  stage = s;
+  console.log(`  [${stamp()}] stage: ${mask(s)}`);
+}
+
+// Written after every recipient (R20). Temp file + rename, so a kill can never leave it half-written.
+function writeResult(reason) {
+  const tmp = resultPath + ".tmp";
+  fs.writeFileSync(
+    tmp,
+    JSON.stringify({ sender: mask(sender), reason: reason || null, stage, in_flight: inFlight, results }, null, 2),
+    "utf8"
+  );
+  fs.renameSync(tmp, resultPath);
+}
 
 
 function finish(code, reason) {
   if (finished) return;
   finished = true;
-  fs.writeFileSync(
-    resultPath,
-    JSON.stringify({ sender: mask(sender), reason: reason || null, results }, null, 2),
-    "utf8"
-  );
+  writeResult(reason);
   // The QR encodes a short-lived, single-use linking secret; don't leave it on disk once
   // the run is over, whether it was scanned, expired, or the run stopped for another reason.
   try { fs.unlinkSync(qrImagePath); } catch {}
-  if (reason) console.error(`wa_send: stopped — ${reason}`);
+  if (reason) console.error(`wa_send: stopped — ${reason} (last stage: ${stage})`);
   process.exit(code);
 }
 
@@ -78,6 +100,8 @@ const client = new Client({
 const qrImagePath = path.join(path.dirname(resultPath), "wa_link_qr.png");
 let qrTimer = null;
 client.on("qr", (qr) => {
+  clearTimeout(launchTimer); // no session: the QR timer below takes over (R16)
+  setStage("waiting for QR scan");
   console.log("No linked device yet. On the sending phone: WhatsApp -> Settings ->");
   console.log("Linked devices -> Link a device, then scan this code:\n");
   qrcodeTerminal.generate(qr, { small: true });
@@ -87,56 +111,52 @@ client.on("qr", (qr) => {
   });
   if (!qrTimer) {
     qrTimer = setTimeout(
-      () => client.destroy().finally(() => finish(3, "auth-timeout")),
+      () => capped(client.destroy(), DESTROY_CAP).then(() => finish(3, "auth-timeout")),
       job.qr_timeout * 1000
     );
   }
 });
 client.on("authenticated", () => {
   if (qrTimer) clearTimeout(qrTimer);
+  setStage("authenticated");
 });
+client.on("loading_screen", (pct) => setStage(`loading ${pct}%`));
 client.on("auth_failure", () => finish(3, "auth"));
 client.on("disconnected", () => finish(3, "auth"));
 
 client.on("ready", async () => {
+  clearTimeout(launchTimer);
+  setStage("ready");
   try {
     sender = (client.info && client.info.wid && client.info.wid.user) || "";
     // Guard against a different account being linked than the one configured (R8).
     if (sender !== job.sender) {
       console.error(`wa_send: linked account is ${mask(sender)}, expected ${mask(job.sender)}`);
-      await client.destroy();
+      await capped(client.destroy(), DESTROY_CAP);
       return finish(4, "sender-mismatch");
     }
     console.log(`wa_send: linked as ${mask(sender)}, ${job.recipients.length} to send (${job.mode})`);
 
     for (let i = 0; i < job.recipients.length; i++) {
       const r = job.recipients[i];
-      const chatId = `${r.to}@c.us`;
-      try {
-        if (!(await client.isRegisteredUser(chatId))) {
-          results.push({ person: r.person, status: "not_registered" });
-          console.log(`  ${r.person}: not on WhatsApp`);
-          continue;
-        }
-        const ids = [];
-        for (const part of r.parts) {
-          // sendMessage resolving without throwing is the send signal we trust: this
-          // whatsapp-web.js version sometimes returns undefined (no .id to read) even
-          // when the message was genuinely delivered — a known version-drift quirk
-          // between the library and WhatsApp Web's current internals. A chat-history
-          // re-check was tried and found unreliable in practice, so a missing id is
-          // recorded as "unconfirmed" rather than treated as a failure (a real failure
-          // still surfaces as sendMessage throwing, which the outer catch below handles).
-          const msg = await client.sendMessage(chatId, part);
-          ids.push(msg && msg.id && msg.id._serialized ? msg.id._serialized : "unconfirmed");
-        }
-        results.push({ person: r.person, status: "ok", ids, at: new Date().toISOString() });
-        console.log(`  ${r.person}: sent ${ids.length} message(s) to ${mask(r.to)}`);
-      } catch (err) {
-        // One bad recipient must not cost everybody else their message (R10).
-        results.push({ person: r.person, status: "error", error: mask(err.message) });
-        console.error(`  ${r.person}: failed — ${mask(err.message)}`);
+      inFlight = r.person;
+      setStage(`sending ${r.person}`);
+      writeResult(null); // a kill from here on names this person as in flight (R20, R21)
+      const outcome = await Promise.race([
+        sendOne(r).then((row) => ({ row })),
+        sleep(SEND_TIMEOUT).then(() => ({ timedOut: true })),
+      ]);
+      if (outcome.timedOut) {
+        // Delivery is unknown: never call this a failure, or a retry could double-message them (R19).
+        results.push({ person: r.person, status: "unconfirmed", error: "send timed out - delivery unknown, check the chat" });
+        inFlight = null;
+        console.error(`  ${r.person}: no answer within ${SEND_TIMEOUT / 1000}s - delivery unknown`);
+        await capped(client.destroy(), DESTROY_CAP);
+        return finish(8, "send-timeout");
       }
+      results.push(outcome.row);
+      inFlight = null;
+      writeResult(null);
       if (i < job.recipients.length - 1) {
         const wait = job.min_delay + Math.random() * (job.max_delay - job.min_delay);
         console.log(`  waiting ${wait.toFixed(1)}s`);
@@ -148,16 +168,54 @@ client.on("ready", async () => {
     // browser is torn down — sendMessage can resolve on local state slightly ahead of
     // the network round trip, and destroying the page mid-flight can drop it silently.
     await sleep(5000);
-    await client.destroy();
+    await capped(client.destroy(), DESTROY_CAP);
     finish(0, null);
   } catch (err) {
     console.error(`wa_send: ${mask(err.message)}`);
-    await client.destroy().catch(() => {});
+    await capped(client.destroy(), DESTROY_CAP);
     finish(5, "worker-error");
   }
 });
 
+// One recipient's check-and-send. Never throws: a bad recipient must not cost everybody else
+// their message (R10), so its error becomes that recipient's result row.
+async function sendOne(r) {
+  const chatId = `${r.to}@c.us`;
+  try {
+    if (!(await client.isRegisteredUser(chatId))) {
+      console.log(`  ${r.person}: not on WhatsApp`);
+      return { person: r.person, status: "not_registered" };
+    }
+    const ids = [];
+    for (const part of r.parts) {
+      // sendMessage resolving without throwing is the send signal we trust: this
+      // whatsapp-web.js version sometimes returns undefined (no .id to read) even
+      // when the message was genuinely delivered - a known version-drift quirk
+      // between the library and WhatsApp Web's current internals. A chat-history
+      // re-check was tried and found unreliable in practice, so a missing id is
+      // recorded as "unconfirmed" rather than treated as a failure (a real failure
+      // still surfaces as sendMessage throwing, which is caught below).
+      const msg = await client.sendMessage(chatId, part);
+      ids.push(msg && msg.id && msg.id._serialized ? msg.id._serialized : "unconfirmed");
+    }
+    console.log(`  ${r.person}: sent ${ids.length} message(s) to ${mask(r.to)}`);
+    return { person: r.person, status: "ok", ids, at: new Date().toISOString() };
+  } catch (err) {
+    console.error(`  ${r.person}: failed - ${mask(err.message)}`);
+    return { person: r.person, status: "error", error: mask(err.message) };
+  }
+}
+
+// R18: if WhatsApp Web never becomes ready, give up cleanly with nothing sent.
+const launchTimer = setTimeout(async () => {
+  console.error(`wa_send: not ready within ${READY_TIMEOUT / 1000}s`);
+  await capped(client.destroy(), DESTROY_CAP);
+  finish(7, "startup-timeout");
+}, READY_TIMEOUT);
+
+setStage("launching");
 client.initialize().catch((err) => {
+  clearTimeout(launchTimer);
   console.error(`wa_send: could not start Chrome — ${err.message}`);
   finish(6, "launch-failed");
 });

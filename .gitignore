@@ -8,6 +8,9 @@ plan/testMD/*
 src/calendarLinks/lists.txt
 src/messageListNDetails/WhatsappContacts.txt
 
+# --- Per-machine scheduler settings (commit scheduler.env.sample instead) ---
+src/scheduler/scheduler.env
+
 # --- Skill outputs (real names / events / send logs) ---
 outputs/**/*
 !outputs/**/
