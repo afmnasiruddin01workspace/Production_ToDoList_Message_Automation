@@ -69,6 +69,26 @@ $Started = Get-Date
 $Stamp   = $Started.ToString('yyyy-MM-ddTHHmm')
 $Today   = $Started.ToString('yyyy-MM-dd')   # machine TZ is already Asia/Dhaka (+06:00)
 
+# v1.1 (R16): Task Scheduler's "Run" action launches this exact same registered command, so a
+# `-Trigger schedule` launch cannot by itself tell "the real 10:00 fire" apart from "someone
+# clicked Run in the GUI" - both looked identical in the log until now (found 2026-09-23, when a
+# manual Run near 9:00 was logged and alerted exactly like a real scheduled failure, then quietly
+# started its own 15-minute self-retry chain that was still running when the real 10:00 trigger
+# fired). $EffectiveTrigger relabels a `schedule` launch that falls well outside the configured
+# SCHED_TIME window as `manual-gui`: it still runs (the owner may be testing on purpose), but it is
+# logged distinctly, alerts immediately on failure instead of staying quiet, and never joins the
+# schedule day's attempt ladder or self-retry loop - so a stray click can no longer chain into (or
+# collide with) the real run.
+$SchedTimeStr    = if ($cfg['SCHED_TIME']) { $cfg['SCHED_TIME'] } else { '10:00' }
+$SchedToday      = $Started.Date.Add(([datetime]::ParseExact($SchedTimeStr, 'HH:mm', $null)).TimeOfDay)
+$WindowStart     = $SchedToday.AddMinutes(-5)
+$WindowEnd       = $SchedToday.AddMinutes(15 * ($MaxAttempts - 1) + 20)   # covers every self-retry plus slack
+$EffectiveTrigger = $Trigger
+if ($Trigger -eq 'schedule' -and ($Started -lt $WindowStart -or $Started -gt $WindowEnd)) {
+    $EffectiveTrigger = 'manual-gui'
+    Write-Host "note: launched via Task Scheduler but well outside the $SchedTimeStr window - treating as manual-gui, not schedule"
+}
+
 # ---------------------------------------------------------------- helpers
 function Get-RunLog {
     if (Test-Path $RunLog) {
@@ -94,7 +114,9 @@ function Save-Run([hashtable]$Entry) {
 function Get-AttemptNumber {
     # Task Scheduler restarts the same task, so the attempt number is derived from today's
     # already-failed scheduled runs (R11: alert only once the last attempt has failed).
-    if ($Trigger -ne 'schedule') { return 1 }
+    # Uses $EffectiveTrigger (v1.1, R16): a manual-gui launch never joins the schedule day's
+    # attempt ladder, so a stray click can't inflate or be confused with the real run's count.
+    if ($EffectiveTrigger -ne 'schedule') { return 1 }
     $runs = @((Get-RunLog).runs)
     $failedToday = @($runs | Where-Object {
         $_.date -eq $Today -and $_.trigger -eq 'schedule' -and
@@ -125,6 +147,31 @@ function Test-Lock {
     return $lock
 }
 
+function Try-AcquireLock {
+    # v1.1 (R15): the old check-then-write (Test-Path, then Set-Content) has a race window
+    # between the two calls. Two launches within milliseconds of each other (found 2026-09-23:
+    # two Task Scheduler instances two seconds apart) could both see no lock and both write one,
+    # the second silently overwriting the first - so both proceeded and collided on the shared
+    # WhatsApp Chrome profile. FileMode.CreateNew is atomic at the OS level: it either creates the
+    # file or throws, with nothing in between for a second process to slip through.
+    for ($try = 0; $try -lt 2; $try++) {
+        try {
+            $fs = [System.IO.File]::Open($LockFile, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+            try {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes((@{ pid = $PID; started = $Started.ToString('o') } | ConvertTo-Json))
+                $fs.Write($bytes, 0, $bytes.Length)
+            } finally { $fs.Close() }
+            return $true
+        } catch [System.IO.IOException] {
+            # Someone else's lock file already exists. If it's live, we lose fairly; if it's
+            # stale, clear it and try the atomic create once more.
+            if (Test-Lock) { return $false }
+            Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $false
+}
+
 # ---------------------------------------------------------------- run
 $status    = 'ok'
 $errorText = $null
@@ -141,16 +188,15 @@ try {
     # WhatsApp message or a popup window - those are reserved for things that need the owner.
     # Note there is exactly one Save-Run in this script, in the finally block: an `exit` here
     # would still run finally and write the row a second time.
-    $held = Test-Lock
-    if ($held) {
+    if (-not (Try-AcquireLock)) {
         $status = 'skipped_locked'
-        $errorText = "another run (pid $($held.pid)) started $($held.started) is still going"
+        $held = Test-Lock
+        $errorText = if ($held) { "another run (pid $($held.pid)) started $($held.started) is still going" }
+                     else { "the lock is held by another run that started at nearly the same moment" }
         $alerts = Send-Alert 'ToDo scheduler: run skipped' $errorText -Only @('toast')
         Write-Host "skipped: $errorText"
         return
     }
-    @{ pid = $PID; started = $Started.ToString('o') } | ConvertTo-Json |
-        Set-Content -Path $LockFile -Encoding UTF8
     $lockTaken = $true
 
     # 2 -------------------------------------------------------- pre-flight (R3)
@@ -291,7 +337,7 @@ finally {
 
     # 6 ------------------------------------------------------- alert (R10, R11)
     $isFailure = $status -notin @('ok', 'ok_nothing_to_send', 'skipped_locked')
-    if ($isFailure -and ($Trigger -ne 'schedule' -or $attempt -ge $MaxAttempts)) {
+    if ($isFailure -and ($EffectiveTrigger -ne 'schedule' -or $attempt -ge $MaxAttempts)) {
         $alerts = Send-Alert "ToDo scheduler failed: $status" `
                              "Attempt $attempt of $MaxAttempts on $Today.`n`n$errorText"
     }
@@ -303,7 +349,7 @@ finally {
     Save-Run @{
         date = $Today; started_at = $Started.ToString('o'); finished_at = $finished.ToString('o')
         duration_s = [int]($finished - $Started).TotalSeconds
-        trigger = $Trigger; attempt = $attempt; status = $status
+        trigger = $EffectiveTrigger; attempt = $attempt; status = $status
         preflight = $preflight; claude = $claudeInfo; verify = $verify
         # Both halves are recorded: a channel that failed is as diagnostic as one that fired,
         # and R10 requires a failed channel to be visible as notify_failed rather than silently absent.
@@ -327,7 +373,10 @@ if ($status -in @('ok', 'ok_nothing_to_send', 'skipped_locked')) { exit 0 }
 # (to get no window at all), and conhost does not pass our exit code back - Task Scheduler always
 # sees 0x0, so its RestartCount can never fire (found 2026-09-21: attempt 1 failed, nothing retried).
 # The lock is already released and this attempt's row already saved, so re-running ourselves is safe.
-if ($Trigger -eq 'schedule' -and $attempt -lt $MaxAttempts) {
+# Uses $EffectiveTrigger (v1.1, R16): a manual-gui launch never self-retries, so a stray click at
+# some other time of day can't chain into a 15-minute retry loop that's still running when the
+# real scheduled fire arrives (found 2026-09-23 - see the note where $EffectiveTrigger is set).
+if ($EffectiveTrigger -eq 'schedule' -and $attempt -lt $MaxAttempts) {
     Write-Host "attempt $attempt failed - waiting 15 minutes, then attempt $($attempt + 1)"
     Start-Sleep -Seconds 900
     & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -Trigger schedule

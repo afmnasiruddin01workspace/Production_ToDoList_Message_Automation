@@ -50,7 +50,7 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | **WhatsApp warns or blocks the number** | Automated sending detected (this is against WhatsApp's terms, a known and accepted risk) | Business app shows a warning | Stop immediately (`WA_MODE=dry-run`), unlink the device, write an incident under `docs/incidents/`, send by hand until decided otherwise |
 
 ## 03-scheduler
-**v1.0: Task Scheduler → `conhost.exe --headless` PowerShell wrapper → headless `claude -p` running skills 01 then 02** — see `plan/stableMD/03-scheduler.stable.md` §12 for full detail and the real incidents this table summarizes.
+**v1.1: Task Scheduler → `conhost.exe --headless` PowerShell wrapper → headless `claude -p` running skills 01 then 02, now with an atomic lock and manual-Run detection** — see `plan/stableMD/03-scheduler.stable.md` §12 for full detail and the real incidents this table summarizes.
 
 | Symptom | Likely cause | How to check | Fix |
 |---|---|---|---|
@@ -65,6 +65,8 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | No toast appears, though the log shows a failure | WinRT toast blocked by Focus Assist or notification settings | `run_log.json`'s `alerts` list for that run | The visible window and the WhatsApp alert still fire on the final attempt; re-enable notifications for PowerShell in Windows Settings |
 | 10:00 came and went, nothing in `run_log.json` | Laptop was off or asleep; or the task got disabled | `Get-ScheduledTask ToDo-WhatsApp-Daily \| Get-ScheduledTaskInfo` | `StartWhenAvailable` should catch it on wake (not yet observed live — see the skill's Known limitations); if the task is disabled, re-run `install_task.ps1` |
 | Daily token cost creeping up | The agent is taking unusually many turns, or the model was changed | `total_cost_usd` per run in `run_log.json` | Keep `SCHED_MODEL=sonnet`; if turns are consistently high, tighten `prompt.txt` |
+| Two (or more) `run_daily.ps1` instances running at once; one fails with a WhatsApp/Chrome "already running for .secrets/wweb-auth/session" error | Two launches started within milliseconds of each other slipped past the old check-then-write lock before either had written the file — most likely a Task Scheduler "Run" click, possibly a double-click | `Get-CimInstance Win32_Process` shows more than one `run_daily.ps1` process tree; `run_log.json` has two rows with nearly identical `started_at` timestamps | Fixed in v1.1: lock acquisition is atomic. If it still happens, kill every `run_daily.ps1` process tree (`taskkill /PID <pid> /T /F` on each `conhost.exe` root), delete a stale `run.lock`, and confirm no `chrome.exe` still references `wweb-auth` before the next fire |
+| A failed run at an odd time of day quietly starts a 15-minute retry loop still running when the real 10:00 trigger arrives | Task Scheduler's "Run" button launches the identical registered command as the real trigger, so a manual click used to be indistinguishable from the genuine 10:00 fire — including inheriting its self-retry | `run_log.json` shows `trigger: schedule` at a time far from `SCHED_TIME`, or a `run_daily.ps1` process still alive long after it should have finished | Fixed in v1.1: an out-of-window `schedule` launch is now logged `trigger: manual-gui` and never self-retries. To test by hand, use `pwsh -File src/scheduler/run_daily.ps1 -Trigger manual -Mode dry-run` from a terminal rather than the Task Scheduler "Run" button |
 
 ## Git / Repository
 | Symptom | Likely cause | Fix |

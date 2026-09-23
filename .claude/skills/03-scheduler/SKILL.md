@@ -5,7 +5,7 @@ description: Runs modules 01 (calendar-todo) then 02 (whatsapp-message) automati
 
 # 03 — Scheduler
 
-Source of truth: `plan/stableMD/03-scheduler.stable.md` (v1.0). This skill is a summary of its §7 Steps — if they ever disagree, the stable plan wins and this file needs updating.
+Source of truth: `plan/stableMD/03-scheduler.stable.md` (v1.1). This skill is a summary of its §7 Steps — if they ever disagree, the stable plan wins and this file needs updating.
 
 ## When to use
 This skill is not invoked directly — it *invokes* `01-calendar-todo` and `02-whatsapp-message` from inside a headless `claude -p` session launched by Windows Task Scheduler. You interact with it only through `src/scheduler/install_task.ps1` (install/status/uninstall) and by reading `outputs/03-scheduler/run_log.json`.
@@ -22,7 +22,7 @@ This skill is not invoked directly — it *invokes* `01-calendar-todo` and `02-w
 ## Steps
 
 1. **Launch, fully hidden.** Task Scheduler runs `conhost.exe --headless <pwsh> -File src/scheduler/run_daily.ps1`. `conhost --headless` is required — a plain `-WindowStyle Hidden` pwsh is silently shown anyway under Windows 11's default-terminal handoff, and closing that window kills the whole run (`0xC000013A`, found and fixed 2026-09-20).
-2. **Lock** (`outputs/03-scheduler/run.lock`) — a second overlapping run (the previous one still going, or a manual fire) sees the lock, logs `skipped_locked`, alerts on the toast channel only, and exits without touching WhatsApp's session profile.
+2. **Lock, atomically** (`outputs/03-scheduler/run.lock`) — a second overlapping run (the previous one still going, or a manual fire) sees the lock, logs `skipped_locked`, alerts on the toast channel only, and exits without touching WhatsApp's session profile. **(v1.1)** Acquisition uses an atomic create, not check-then-write, so two launches within milliseconds of each other can't both slip through — this is exactly what happened on 2026-09-23 (two Task-Scheduler-launched instances collided on the shared Chrome profile) and is now fixed.
 3. **Pre-flight** (`preflight.py`) — 8 checks: Google token refresh (never triggers an interactive sign-in, so it can't hang), `lists.txt`, contacts file, WhatsApp linked session present, WhatsApp config usable, `claude`/`node`/`python` all resolve, disk space, network reachability. Any failure stops the run before it starts, with a specific fix in the alert.
 4. **Run the pipeline** — a headless `claude -p` session, forced `WA_MODE=live`, `--settings src/scheduler/scheduler.settings.json`, follows `src/scheduler/prompt.txt` to invoke skill `01-calendar-todo` then, only if that produced today's `todo_by_name.json`, skill `02-whatsapp-message`.
 5. **Verify from artifacts, not exit codes** — `claude` exiting 0 does not by itself prove anything happened. The wrapper checks `todo_by_name.json` is dated today and `send_log.json` gained a `live` row for today before calling it `ok`.
@@ -30,6 +30,8 @@ This skill is not invoked directly — it *invokes* `01-calendar-todo` and `02-w
 7. **Log** every attempt to `outputs/03-scheduler/run_log.json` (newest first, 60-day retention) — status, preflight results, the `claude` invocation's cost/turns, the verify block, which alert channels fired.
 8. **Alert only once it matters.** No alert on attempt 1 or 2 of a scheduled run; the final failed attempt alerts on all four channels (WhatsApp to the owner's own number, a Windows toast, the log — always written — and a visible console window with the failure and its fix). A `skipped_locked` alerts only the toast, since it is usually benign.
 9. **Unlock, always**, in a `finally`, whatever the outcome.
+
+**(v1.1) A Task Scheduler launch is not automatically trusted as the real 10:00 fire.** Clicking "Run" in Task Scheduler's GUI launches the exact same registered command as the real trigger, so before this fix a manual click was indistinguishable from the genuine schedule — including inheriting its 15-minute self-retry loop, which is exactly what happened on 2026-09-23 (a stray click near 9:01 started a retry chain still running when the real 10:00 trigger fired). Every `-Trigger schedule` launch is now checked against the configured `SCHED_TIME` window: inside it, treated as `schedule` as before; well outside it, relabeled `trigger: manual-gui` — it still runs (useful for a deliberate test), but alerts on failure immediately instead of waiting for the attempt ladder, and never self-retries. **If you want to test by hand, prefer a terminal** (`pwsh -File src/scheduler/run_daily.ps1 -Trigger manual -Mode dry-run`) over the Task Scheduler "Run" button — it's unambiguous and defaults to a mode that never sends.
 
 ## Known limitations (do not try to "fix" these without re-opening the plan)
 - **The pre-10:00 WhatsApp worker hang is unexplained.** On three real mornings (2026-09-20, -21, -22) module 02's worker stalled at start-up around 10:01; it runs normally by hand minutes later. Module 02 v1.2's worker timeout bounds this at 120s and this scheduler's retry recovers from it automatically, but the root cause is still undiagnosed — worth its own investigation if it keeps costing a retry every morning.
