@@ -29,8 +29,29 @@ let finished = false;
 const READY_TIMEOUT = Number(job.ready_timeout || 120) * 1000;
 const SEND_TIMEOUT = Number(job.send_timeout || 60) * 1000;
 const DESTROY_CAP = 15000;
+// v2.0 (R23): after the last send, wait at most this long for every message to reach the phone.
+const ACK_TIMEOUT = Number(job.ack_timeout ?? 45) * 1000;
+const SETTLE_MIN = 5000;
 let stage = "starting";
 let inFlight = null; // the recipient whose send has started but not yet been recorded
+
+// v2.0 (R23): delivery receipts. This library version returns no message from sendMessage and
+// gives message_create no serialized id (chats are addressed by @lid now), so a receipt is
+// matched to what we sent by its exact body text. Each body names its person and that day's
+// list, so two pending messages never share one. ack: -1 error, 0 pending, 1 server,
+// 2 delivered to the phone, 3 read, 4 played. null = no receipt seen at all.
+const receipts = new Map(); // body -> { ack }
+const partsOf = new Map(); // person -> [body, ...]
+const acksFor = (person) => (partsOf.get(person) || []).map((b) => receipts.get(b).ack);
+function onReceipt(msg, ack) {
+  if (!msg || !msg.fromMe || typeof msg.body !== "string") return;
+  const rec = receipts.get(msg.body) || receipts.get(msg.body.trim());
+  if (!rec || typeof ack !== "number") return;
+  // Which message is this receipt really for? msg.timestamp is when that message was created.
+  const age = typeof msg.timestamp === "number" ? msg.timestamp - rec.sentAt : null;
+  console.log(`  [${stamp()}] receipt ${rec.person}: ack ${ack}` + (age === null ? "" : ` (message created ${age >= 0 ? "+" : ""}${age}s vs this send)`));
+  if (rec.ack === null || ack > rec.ack) rec.ack = ack;
+}
 
 const mask = (v) => String(v || "").replace(/\d{8,}/g, (m) => "****" + m.slice(-4));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -48,7 +69,11 @@ function writeResult(reason) {
   const tmp = resultPath + ".tmp";
   fs.writeFileSync(
     tmp,
-    JSON.stringify({ sender: mask(sender), reason: reason || null, stage, in_flight: inFlight, results }, null, 2),
+    JSON.stringify({
+      sender: mask(sender), reason: reason || null, stage, in_flight: inFlight,
+      in_flight_acks: inFlight ? acksFor(inFlight) : null,
+      results: results.map((row) => ({ ...row, acks: acksFor(row.person) })),
+    }, null, 2),
     "utf8"
   );
   fs.renameSync(tmp, resultPath);
@@ -121,6 +146,8 @@ client.on("authenticated", () => {
   setStage("authenticated");
 });
 client.on("loading_screen", (pct) => setStage(`loading ${pct}%`));
+client.on("message_create", (msg) => onReceipt(msg, msg && msg.ack));
+client.on("message_ack", (msg, ack) => onReceipt(msg, ack));
 client.on("auth_failure", () => finish(3, "auth"));
 client.on("disconnected", () => finish(3, "auth"));
 
@@ -167,7 +194,19 @@ client.on("ready", async () => {
     // give the final send a moment to actually reach WhatsApp's servers before the
     // browser is torn down — sendMessage can resolve on local state slightly ahead of
     // the network round trip, and destroying the page mid-flight can drop it silently.
-    await sleep(5000);
+    // v2.0 (R23): that settle now also waits for receipts — until every message is on its
+    // phone (or failed outright), or ACK_TIMEOUT has passed, but never less than SETTLE_MIN.
+    setStage("waiting for delivery receipts");
+    const settleStart = Date.now();
+    const allSettled = () => [...receipts.values()].every((r) => r.ack !== null && (r.ack >= 2 || r.ack < 0));
+    while (Date.now() - settleStart < Math.max(ACK_TIMEOUT, SETTLE_MIN)) {
+      if (Date.now() - settleStart >= SETTLE_MIN && allSettled()) break;
+      await sleep(500);
+    }
+    for (const row of results) {
+      if (partsOf.has(row.person)) console.log(`  ${row.person}: receipt ${acksFor(row.person).join(",")}`);
+    }
+    writeResult(null); // receipts are on disk before teardown, in case teardown is killed
     await capped(client.destroy(), DESTROY_CAP);
     finish(0, null);
   } catch (err) {
@@ -187,6 +226,9 @@ async function sendOne(r) {
       return { person: r.person, status: "not_registered" };
     }
     const ids = [];
+    partsOf.set(r.person, r.parts);
+    const sentAt = Math.floor(Date.now() / 1000);
+    for (const part of r.parts) receipts.set(part, { ack: null, person: r.person, sentAt }); // before sending: acks can beat sendMessage's return
     for (const part of r.parts) {
       // sendMessage resolving without throwing is the send signal we trust: this
       // whatsapp-web.js version sometimes returns undefined (no .id to read) even
@@ -201,6 +243,9 @@ async function sendOne(r) {
     console.log(`  ${r.person}: sent ${ids.length} message(s) to ${mask(r.to)}`);
     return { person: r.person, status: "ok", ids, at: new Date().toISOString() };
   } catch (err) {
+    // A failed send has nothing to wait a receipt for (R23's settle would otherwise sit out ACK_TIMEOUT).
+    for (const part of partsOf.get(r.person) || []) receipts.delete(part);
+    partsOf.delete(r.person);
     console.error(`  ${r.person}: failed - ${mask(err.message)}`);
     return { person: r.person, status: "error", error: mask(err.message) };
   }

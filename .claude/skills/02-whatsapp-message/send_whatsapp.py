@@ -19,6 +19,8 @@ TODO = os.path.join(ROOT, "outputs", "01-calendar-todo", "todo_by_name.json")
 CONTACTS = os.path.join(ROOT, "src", "messageListNDetails", "WhatsappContacts.txt")
 LOG = os.path.join(ROOT, "outputs", "02-whatsapp-message", "send_log.json")
 WORKER = os.path.join(HERE, "wa_send.js")
+sys.path.insert(0, os.path.join(ROOT, "src", "common"))
+import delivery_ledger  # noqa: E402  (v2.0, R26)
 
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 FULL = {"monday": "mon", "tuesday": "tue", "wednesday": "wed", "thursday": "thu",
@@ -36,10 +38,15 @@ DEFAULTS = {"WA_MIN_DELAY": "8", "WA_MAX_DELAY": "25", "WA_MAX_PER_RUN": "10",
             "WA_CHROME_PATH": "",
             "WA_QR_TIMEOUT": "120", "WA_NODE": "node",
             # v1.2 (R18, R19, R21): every wait on the worker is bounded.
-            "WA_READY_TIMEOUT": "120", "WA_SEND_TIMEOUT": "60", "WA_KILL_MARGIN": "60"}
+            "WA_READY_TIMEOUT": "120", "WA_SEND_TIMEOUT": "60", "WA_KILL_MARGIN": "60",
+            # v2.0 (R23): how long to wait after the last send for every message to reach the phone.
+            "WA_ACK_TIMEOUT": "45"}
 SETTINGS = ("WA_MODE", "WA_SENDER_NUMBER", "WA_TEST_NUMBER", "WA_MIN_DELAY", "WA_MAX_DELAY",
             "WA_MAX_PER_RUN", "WA_CHROME_PATH", "WA_QR_TIMEOUT", "WA_NODE", "WA_WORKER",
-            "WA_READY_TIMEOUT", "WA_SEND_TIMEOUT", "WA_KILL_MARGIN")
+            "WA_READY_TIMEOUT", "WA_SEND_TIMEOUT", "WA_KILL_MARGIN", "WA_ACK_TIMEOUT")
+# v2.0 (R23): whatsapp-web.js ack values -> what the log calls them. Ordered weakest first.
+ACK_NAMES = {-1: "error", 0: "pending", 1: "server", 2: "delivered", 3: "read", 4: "read"}
+DELIVERED = {"delivered", "read"}
 
 
 def fail(msg):
@@ -76,7 +83,7 @@ def load_config(secrets_path):
     if mode == "self" and not digits(cfg.get("WA_TEST_NUMBER", "")):
         fail("WA_TEST_NUMBER is required for mode 'self'.")
     for k in ("WA_MIN_DELAY", "WA_MAX_DELAY", "WA_MAX_PER_RUN", "WA_QR_TIMEOUT",
-              "WA_READY_TIMEOUT", "WA_SEND_TIMEOUT", "WA_KILL_MARGIN"):
+              "WA_READY_TIMEOUT", "WA_SEND_TIMEOUT", "WA_KILL_MARGIN", "WA_ACK_TIMEOUT"):
         try:
             float(cfg[k])
         except ValueError:
@@ -183,6 +190,14 @@ def split_message(text):
     return [f"{p} ({i}/{len(parts)})" for i, p in enumerate(parts, 1)]
 
 
+def delivery_of(acks):
+    """The weakest receipt across a message's parts (R23, R24). No receipt seen -> pending."""
+    if not acks:
+        return "pending"
+    weakest = min(0 if a is None else a for a in acks)  # a part with no receipt counts as pending
+    return ACK_NAMES.get(weakest, "pending")
+
+
 def kill_tree(proc):
     """Kill the worker and everything it started (Chrome). taskkill /T walks the tree on Windows."""
     if os.name == "nt":
@@ -206,7 +221,8 @@ def run_worker(cfg, recipients):
            "min_delay": float(cfg["WA_MIN_DELAY"]), "max_delay": float(cfg["WA_MAX_DELAY"]),
            "qr_timeout": float(cfg["WA_QR_TIMEOUT"]),
            "ready_timeout": float(cfg["WA_READY_TIMEOUT"]),
-           "send_timeout": float(cfg["WA_SEND_TIMEOUT"]), "recipients": recipients}
+           "send_timeout": float(cfg["WA_SEND_TIMEOUT"]),
+           "ack_timeout": float(cfg["WA_ACK_TIMEOUT"]), "recipients": recipients}
     fd, job_path = tempfile.mkstemp(prefix="wa_job_", suffix=".json")
     os.close(fd)
     fd, res_path = tempfile.mkstemp(prefix="wa_res_", suffix=".json")
@@ -219,7 +235,7 @@ def run_worker(cfg, recipients):
         # sat for 10+ minutes. Beyond the ceiling the whole process tree is killed.
         ceiling = (float(cfg["WA_READY_TIMEOUT"])
                    + len(recipients) * (float(cfg["WA_SEND_TIMEOUT"]) + float(cfg["WA_MAX_DELAY"]))
-                   + float(cfg["WA_KILL_MARGIN"]))
+                   + float(cfg["WA_ACK_TIMEOUT"]) + float(cfg["WA_KILL_MARGIN"]))
         proc = subprocess.Popen([cfg["WA_NODE"], cfg["WA_WORKER"], job_path, res_path])
         killed = False
         try:
@@ -272,7 +288,15 @@ def main():
     ap.add_argument("--today", help="override today's date (YYYY-MM-DD), for tests")
     ap.add_argument("--check", action="store_true",
                     help="show the settings and the session state, then exit without sending")
+    # v2.0 (R25): options for the manual-send UI.
+    ap.add_argument("--people", help="comma-separated Persons to send to, ignoring their Send days")
+    ap.add_argument("--resend", action="store_true",
+                    help="with --people: send even if already sent today (logged resend: true)")
+    ap.add_argument("--trigger", choices=("schedule", "manual", "manual-ui"), default="manual",
+                    help="who started this run; stored on the run row")
     args = ap.parse_args()
+    if args.resend and not args.people:
+        fail("--resend needs --people: name exactly who should get a second copy.")
 
     cfg = load_config(args.secrets)
     mode = cfg["WA_MODE"]
@@ -299,6 +323,12 @@ def main():
 
     todo = read_todo(args.todo, today)
     contacts, bad_days = read_contacts(args.contacts)
+    chosen = None
+    if args.people:
+        chosen = {p.strip().lower() for p in args.people.split(",") if p.strip()}
+        unknown = sorted(p for p in chosen if p not in contacts)
+        if unknown:
+            fail(f"--people names nobody in {args.contacts}: {', '.join(unknown)} - nothing was sent.")
     previous = load_previous(args.log)
     sent_today = {}
     for run in previous:
@@ -316,16 +346,19 @@ def main():
     cap = int(float(cfg["WA_MAX_PER_RUN"]))
 
     groups = set(todo) | {c["person"] for c in contacts.values()}
+    if chosen is not None:  # R25: everyone not named is left out of the run entirely
+        groups = {g for g in groups if g.strip().lower() in chosen}
     for group in sorted(groups, key=lambda g: (g == "No Name", g.lower())):
         items = todo.get(group, [])
         contact = contacts.get(group.strip().lower())
         if not contact:
             entries.append({"person": group, "status": "skipped_no_contact", "item_count": len(items)})
             continue
-        if group in sent_today:
+        resend = bool(args.resend and chosen is not None and group in sent_today)
+        if group in sent_today and not resend:
             entries.append({**sent_today[group], "status": "already_sent"})
             continue
-        if weekday not in contact["days"]:
+        if chosen is None and weekday not in contact["days"]:
             entries.append({"person": group, "status": "skipped_day", "item_count": len(items),
                             "send_days": contact["raw_days"]})
             continue
@@ -335,6 +368,8 @@ def main():
 
         message = build_message(contact["person"], items, today)
         entry = {"person": group, "item_count": len(items), "message": message}
+        if resend:
+            entry["resend"] = True
         entries.append(entry)
         if mode == "dry-run":
             entry["status"] = "dry-run"
@@ -357,9 +392,10 @@ def main():
             row = reported.get(entry["person"])
             if row is None and entry["person"] == result.get("in_flight"):
                 # The worker died with this person's send in progress: it may or may not have gone
-                # out, so it is unconfirmed, not failed (R20, R21).
+                # out, so it is unconfirmed, not failed (R20, R21). Any receipt seen says which (R24).
                 entry["status"] = "unconfirmed"
                 entry["error"] = f"worker stopped mid-send ({reason}) - delivery unknown, check the chat"
+                entry["delivery"] = delivery_of(result.get("in_flight_acks"))
             elif row is None:
                 entry["status"] = "failed"
                 if reason == "send-timeout":
@@ -371,11 +407,13 @@ def main():
             elif row.get("status") == "unconfirmed":
                 entry["status"] = "unconfirmed"
                 entry["error"] = mask(row.get("error", ""))[:200]
+                entry["delivery"] = delivery_of(row.get("acks"))
             elif row.get("status") == "ok":
                 ids = [mask(i) for i in row.get("ids", [])]
                 entry["status"] = "sent"
                 entry["sent_at"] = row.get("at") or datetime.now(TZ).isoformat(timespec="seconds")
                 entry["message_id"] = ids[0] if len(ids) == 1 else ids
+                entry["delivery"] = delivery_of(row.get("acks"))
             elif row.get("status") == "not_registered":
                 entry["status"] = "not_registered"
             else:
@@ -392,8 +430,14 @@ def main():
                "skipped": sum(v for k, v in counts.items()
                               if k.startswith("skipped") or k == "already_sent"),
                "bad_days": [f"{p}: {', '.join(u)}" for p, u in bad_days]}
+    # v2.0 (R24): only a receipt proves anything; status alone never did.
+    reached = [e for e in entries if e.get("status") in ("sent", "unconfirmed")]
+    not_delivered = [e for e in reached if e.get("delivery") not in DELIVERED]
+    summary["delivered"] = len(reached) - len(not_delivered)
+    summary["not_delivered"] = len(not_delivered)
 
-    run = {"date": str(today), "mode": mode, "started_at": now.isoformat(timespec="seconds"),
+    run = {"date": str(today), "mode": mode, "trigger": args.trigger,
+           "started_at": now.isoformat(timespec="seconds"),
            "entries": entries, "summary": summary}
     if sender:
         run["sender_verified"] = sender
@@ -409,15 +453,33 @@ def main():
         json.dump({"runs": runs}, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
 
+    # v2.0 (R26): the cross-channel ledger. Never allowed to change this run's outcome.
+    try:
+        delivery_ledger.append([
+            {"date": str(today), "channel": "whatsapp", "person": e["person"], "trigger": args.trigger,
+             "mode": mode, "status": "resent" if e.get("resend") and e.get("status") == "sent" else e["status"],
+             "delivery": e.get("delivery", ""),
+             "detail": e.get("error") or (f"send days: {e['send_days']}" if e.get("send_days") else "")}
+            for e in entries])
+    except Exception as exc:  # noqa: BLE001 - any failure here is reported, never raised
+        print(f"ledger: not written ({exc})", file=sys.stderr)
+
     print(f"mode={mode} date={today} ({weekday})")
     for entry in entries:
         extra = f" error={entry['error']}" if entry.get("error") else ""
+        if entry.get("delivery"):
+            extra = f" delivery={entry['delivery']}" + (" (resend)" if entry.get("resend") else "") + extra
         print(f"  {entry['person']:<20} {entry['status']:<18} items={entry['item_count']}{extra}")
     print("  " + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) if counts else "(no groups)"))
     for person, unknown in bad_days:
-        print(f"  ! unknown 'Send days' value for {person}: {', '.join(unknown)} — not messaged today")
+        tail = "ignored because --people was given" if chosen is not None else "not messaged today"
+        print(f"  ! unknown 'Send days' value for {person}: {', '.join(unknown)} — {tail}")
     if counts.get("skipped_over_cap"):
         print(f"  ! {counts['skipped_over_cap']} people left for the next run (WA_MAX_PER_RUN={cap})")
+    if reached:
+        print(f"  delivered={summary['delivered']} not_delivered={summary['not_delivered']}")
+    for entry in not_delivered:
+        print(f"  ! {entry['person']}: not confirmed delivered (receipt: {entry.get('delivery')}) - check the chat")
     if reason:
         print(f"  ! worker stopped early: {reason}")
     print(f"log: {args.log}")
