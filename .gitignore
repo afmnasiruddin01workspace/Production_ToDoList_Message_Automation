@@ -7,6 +7,9 @@ plan/testMD/*
 # --- Private data (commit the *.sample.* versions instead) ---
 src/calendarLinks/lists.txt
 src/messageListNDetails/WhatsappContacts.txt
+# Email contacts + reference screenshot (emails, numbers, a real inbox)
+src/EmailContent/*
+!src/EmailContent/EmailContacts.sample.txt
 
 # --- Per-machine scheduler settings (commit scheduler.env.sample instead) ---
 src/scheduler/scheduler.env

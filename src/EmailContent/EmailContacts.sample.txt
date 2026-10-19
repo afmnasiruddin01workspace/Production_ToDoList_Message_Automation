@@ -1,0 +1,3 @@
+Person	WhatsApp contact name	Number	Email_address	Send days
+Alice	W Alice.Example.Team	+880 1000-000001	alice@example.com	Sat,Wed
+Bob	W Bob.Example.Team	+880 1000-000002	bob@example.com	Sun,Thu
