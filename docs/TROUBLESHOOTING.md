@@ -99,6 +99,25 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | Log shows `worker killed after Ns` | The hard ceiling fired: Outlook or the worker wedged | stderr, last stage | Handled recipients are logged from the partial result; check Sent Items for the in-flight one before re-running |
 | Refuses to start | `EMAIL_MODE` missing or misspelled | stderr | Set it to `dry-run`, `self` or `live` in `.secrets/email.env` |
 
+## 05-manual-ui
+**v1.0: the local manual-send page** - see `plan/stableMD/05-manual-ui.stable.md` section 12 for the full table.
+
+| Symptom | Likely cause | How to check | Fix |
+|---|---|---|---|
+| The page says 401 / "start the UI from the launcher" | The server was restarted (new token) or the cookie is gone | the message | Use the Start Menu shortcut or `src\ui\start_ui.cmd` (it opens the right link) |
+| `start_ui.cmd` does nothing or says no Python | `python` is the Microsoft Store alias, or Flask is missing | the console message | The launcher tries `py -3` and the install folders; `python -m pip install flask` if Flask is missing |
+| "The UI is already running" | A second start found a live server | the message names the port | Use the open browser tab, or `start_ui.cmd --stop` and start again |
+| Send/Rebuild refused: "a run is in progress" | The scheduler (or another job) holds `outputs/03-scheduler/run.lock` | the strip shows who/since | Wait; a lock from a dead process or older than 30 minutes is reclaimed automatically |
+| A job is refused "the scheduled run starts at ..." | The 10:00 guard: 6 minutes before to 3 minutes after `SCHED_TIME` | the message | Wait a few minutes: holding the lock now would make the scheduled run skip the day (not retried) |
+| All send controls disabled, banner says the list is old | `todo_by_name.json` is not from today | the banner shows its date | **Rebuild list**, or wait for the 10:00 run |
+| A person is unticked though the day matches | Already sent today, no items, or (email) no valid address | the state column | A resend needs the confirm (live mode only); fix the contact row for an invalid address |
+| The job ran as `dry-run` though you meant `self` | The mode radio was still on dry-run (it resets on every page load) | the confirm box's first line says "Mode: ..." | Read that line before confirming; pick the mode after the page has loaded |
+| A WhatsApp row shows `server` or `pending` | The recipient's phone had not confirmed within the wait | the Log's colour and `delivery` | Check the chat on the primary phone; resend only if it still shows one tick hours later |
+| A manual WhatsApp send fails with "browser already running" | A terminal run of module 02 holds the Chrome profile | the job's output | Close the other run; use the UI or the scheduler for WhatsApp |
+| The Log shows old rows with no delivery column | `legacy` rows from before 2026-10-19 | the `source` column | Expected: those sends predate delivery receipts |
+| Email shows `queued` | Outlook was offline | the Log | It sends when Outlook reconnects; do not resend |
+| Times look 6 hours off | (fixed in v1.0) module 02 stores UTC | - | Update; the UI converts to Asia/Dhaka |
+
 ## Git / Repository
 | Symptom | Likely cause | Fix |
 |---|---|---|

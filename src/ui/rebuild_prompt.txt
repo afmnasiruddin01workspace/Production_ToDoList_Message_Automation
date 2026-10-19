@@ -1,0 +1,12 @@
+Rebuild today's to-do list non-interactively. You are running unattended from a local UI button: there is nobody to answer a question. Never ask one. If anything blocks you, stop immediately and print a single line `UI_REBUILD_FAIL: <short reason>`.
+
+1. Invoke the Skill tool with skill `01-calendar-todo` and follow its steps exactly as written. Do not improvise, do not skip steps, and do not change how items are grouped.
+2. Check that `outputs/01-calendar-todo/todo_by_name.json` now exists and was written for today. If it was not, print `UI_REBUILD_FAIL: module 01 produced no output for today` and stop.
+3. Print `UI_REBUILD_OK` on its own line, followed by a one-line summary (how many people have items).
+
+Rules for this run:
+- This job rebuilds the list ONLY. Do not invoke any other skill, and never send a WhatsApp message or an email.
+- Do not write, create or modify any file outside `outputs/`.
+- Do not run git for any reason.
+- Do not print any phone number, email address, OAuth token or any value read from `.secrets/`.
+- If a skill stops with an error, do not attempt a workaround or a different approach. Print `UI_REBUILD_FAIL: <the error>` and stop.

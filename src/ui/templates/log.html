@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% macro sel(name, label, items) %}
+<label>{{ label }} <select name="{{ name }}"><option value="">all</option>{% for i in items %}<option value="{{ i }}" {{ 'selected' if q.get(name) == i }}>{{ i }}</option>{% endfor %}</select></label>
+{% endmacro %}
+{% block main %}
+<form method="get" action="/log" class="filters">
+  <label>From <input type="date" name="from" value="{{ q.get('from','') }}"></label>
+  <label>To <input type="date" name="to" value="{{ q.get('to','') }}"></label>
+  {{ sel('channel','Channel',opts.channels) }}
+  {{ sel('person','Person',opts.people) }}
+  {{ sel('status','Status',opts.statuses) }}
+  {{ sel('trigger','Trigger',opts.triggers) }}
+  {{ sel('mode','Mode',opts.modes) }}
+  <label><input type="checkbox" name="skipped" value="1" {{ 'checked' if q.get('skipped') == '1' }}> show skipped</label>
+  <button type="submit">Filter</button>
+  <a class="btn" href="/log.csv?{{ request.query_string.decode() }}">Export CSV</a>
+</form>
+<p class="muted">{{ total }} row(s){% if total > rows|length %}, first {{ rows|length }} shown (the CSV has all){% endif %}. Rows marked <b>legacy</b> predate delivery receipts (2026-10-19): their <i>sent</i> only means "WhatsApp Web accepted it".
+WhatsApp receipts cannot be refreshed after a run &mdash; the module can only see a receipt while its browser is connected; email receipts can (Send page &rarr; Refresh email receipts).</p>
+<table class="log">
+  <thead><tr><th>Date</th><th>Time</th><th>Channel</th><th>Person</th><th>Trigger</th><th>Mode</th><th>Status</th><th>Delivery</th><th>Detail</th><th>Source</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr class="{{ r.cls }}"><td>{{ r.date }}</td><td>{{ r.time }}</td><td>{{ r.channel }}</td><td>{{ r.person }}</td><td>{{ r.trigger }}</td><td>{{ r.mode }}</td><td>{{ r.status }}</td><td>{{ r.delivery }}</td><td>{{ r.detail }}</td><td>{{ r.source }}</td></tr>
+  {% else %}
+  <tr><td colspan="10" class="muted">No rows match.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

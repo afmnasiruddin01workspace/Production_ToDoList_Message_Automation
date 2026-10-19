@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block main %}
+{% if not table.list.fresh %}
+<div class="banner bad" id="stale">
+  {% if table.list.exists %}The to-do list is from <b>{{ table.list.date }}</b>, not today ({{ table.date }}).{% else %}There is no to-do list yet.{% endif %}
+  Sending is disabled until it is rebuilt. <button type="button" id="rebuild-btn">Rebuild list</button>
+</div>
+{% else %}
+<p class="muted">List written {{ table.list.when }} &middot; today is {{ table.date }} ({{ table.weekday }}) &middot; <button type="button" class="link" id="rebuild-btn">Rebuild list</button></p>
+{% endif %}
+
+<form id="send-form" autocomplete="off" onsubmit="return false">
+<fieldset class="modes">
+  <legend>Mode</legend>
+  <label><input type="radio" name="mode" value="dry-run" checked> dry-run <small>(nothing is sent)</small></label>
+  <label><input type="radio" name="mode" value="self"> self <small>(goes to your own test number / mailbox)</small></label>
+  <label class="livelabel"><input type="radio" name="mode" value="live"> LIVE <small>(goes to real people)</small></label>
+</fieldset>
+
+<table class="people" id="people">
+  <thead><tr><th>Person</th><th colspan="2">WhatsApp</th><th colspan="2">Email</th><th></th></tr></thead>
+  <tbody>
+  {% for r in table.rows %}
+  <tr data-person="{{ r.person }}">
+    <td class="name">{{ r.person }}</td>
+    {% for ch in ('whatsapp', 'email') %}
+      {% set c = r[ch] %}
+      {% if c.present %}
+      <td class="chk"><input type="checkbox" data-ch="{{ ch }}" data-person="{{ r.person }}" data-resend="{{ '1' if c.resend }}" data-first="{{ c.first_sent or '' }}" {{ 'checked' if c.tick }} {{ 'disabled' if not table.list.fresh }}></td>
+      <td class="st {{ c.cls }}">{{ c.state }}<small>{{ c.count }} item(s){{ ' · due today' if c.due else ' · not due' }}</small></td>
+      {% else %}
+      <td class="chk"></td><td class="st mute">{{ c.state }}</td>
+      {% endif %}
+    {% endfor %}
+    <td><button type="button" class="link preview" data-person="{{ r.person }}">Preview</button></td>
+  </tr>
+  <tr class="prev" hidden><td colspan="6"><div class="prevbox"></div></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div class="actions">
+  <button type="button" id="send-btn" class="primary" {{ 'disabled' if not table.list.fresh }}>Send&hellip;</button>
+  <button type="button" id="refresh-btn">Refresh email receipts</button>
+</div>
+</form>
+
+<div id="confirm" class="modal" hidden>
+  <div class="box">
+    <h2 id="confirm-title"></h2>
+    <div id="confirm-body"></div>
+    <div class="actions"><button type="button" id="confirm-go" class="primary">Confirm and run</button> <button type="button" id="confirm-cancel">Cancel</button></div>
+  </div>
+</div>
+
+<section id="jobbox" hidden>
+  <h2>Job <span id="jobstate" class="pill"></span></h2>
+  <p id="jobstep" class="muted"></p>
+  <table class="out" id="outcome" hidden><thead><tr><th>Person</th><th>Channel</th><th>Status</th><th>Delivery</th><th>Detail</th></tr></thead><tbody></tbody></table>
+  <p id="jobmsg"></p>
+  <pre id="joblines"></pre>
+</section>
+{% endblock %}
