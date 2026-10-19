@@ -73,6 +73,24 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | Two (or more) `run_daily.ps1` instances running at once; one fails with a WhatsApp/Chrome "already running for .secrets/wweb-auth/session" error | Two launches started within milliseconds of each other slipped past the old check-then-write lock before either had written the file — most likely a Task Scheduler "Run" click, possibly a double-click | `Get-CimInstance Win32_Process` shows more than one `run_daily.ps1` process tree; `run_log.json` has two rows with nearly identical `started_at` timestamps | Fixed in v1.1: lock acquisition is atomic. If it still happens, kill every `run_daily.ps1` process tree (`taskkill /PID <pid> /T /F` on each `conhost.exe` root), delete a stale `run.lock`, and confirm no `chrome.exe` still references `wweb-auth` before the next fire |
 | A failed run at an odd time of day quietly starts a 15-minute retry loop still running when the real 10:00 trigger arrives | Task Scheduler's "Run" button launches the identical registered command as the real trigger, so a manual click used to be indistinguishable from the genuine 10:00 fire — including inheriting its self-retry | `run_log.json` shows `trigger: schedule` at a time far from `SCHED_TIME`, or a `run_daily.ps1` process still alive long after it should have finished | Fixed in v1.1: an out-of-window `schedule` launch is now logged `trigger: manual-gui` and never self-retries. To test by hand, use `pwsh -File src/scheduler/run_daily.ps1 -Trigger manual -Mode dry-run` from a terminal rather than the Task Scheduler "Run" button |
 
+## 04-email-message
+**v1.0: email through the owner's classic Outlook** (COM, no password) with Sent Items proof and bounce detection — see `plan/stableMD/04-email-message.stable.md` §12 for the full table.
+
+| Symptom | Likely cause | How to check | Fix |
+|---|---|---|---|
+| Run stops: `outlook-unavailable` | Outlook did not become ready within `EMAIL_STARTUP_TIMEOUT` (profile problem, sign-in needed, classic Outlook missing) | stderr reason; `send_email.py --check` | Open Outlook by hand once and sign in; check `EMAIL_OUTLOOK_PROFILE`. Nothing was sent, safe to re-run |
+| A "Choose Profile" window sits on screen | Outlook was started without `/profile` (by hand, or by another program's COM call) | the window | Pick the profile once; the module itself always passes `/profile` |
+| Entry `sent` with `delivery: queued` | Outlook offline or not synchronised: the mail is in the Outbox | stderr `! ... still in the Outbox` | Go online — it will send. **Do not re-run** (it would not resend anyway) |
+| Entry `unconfirmed` / `delivery: pending` | `Send()` returned but the mail is in neither Sent Items nor the Outbox | the log | **Check Sent Items by hand first.** Found → nothing to do; not found → send by hand or clear the entry and re-run |
+| Entry `delivery: bounced` | The address is wrong or the mailbox is gone (a non-delivery report is in the Inbox) | stderr `! ... non-delivery report received` | Correct the address in `EmailContacts.txt`, then resend from the manual UI |
+| A bounce is in the Inbox but the run says `bounced: 0` | The scan could not read it | the `bounce scan:` line shows `N unreadable` | Run `--reconcile`; never treat "0 bounced" as proof while `unreadable` is not 0 (fixed once already: a report item has no `ReceivedTime`) |
+| `invalid_address` for someone | The contact row has no address, two addresses, or a typo | log status | Fix the row: one address, then the days, separated by spaces |
+| Someone is not mailed though they have items | Email days exclude today, or they are only in the WhatsApp contacts | log status `skipped_day` / `skipped_no_contact` | Edit `EmailContacts.txt` |
+| An Outlook security prompt appears on send | Object-model guard active (antivirus not recognised as current) | the dialog | Stop live sending and decide with the owner; never click through unattended |
+| `skipped_locked` | Another run (scheduler or manual UI) is in progress | `outputs/04-email-message/run.lock` | Wait; a lock from a dead process is reclaimed automatically |
+| Log shows `worker killed after Ns` | The hard ceiling fired: Outlook or the worker wedged | stderr, last stage | Handled recipients are logged from the partial result; check Sent Items for the in-flight one before re-running |
+| Refuses to start | `EMAIL_MODE` missing or misspelled | stderr | Set it to `dry-run`, `self` or `live` in `.secrets/email.env` |
+
 ## Git / Repository
 | Symptom | Likely cause | Fix |
 |---|---|---|
