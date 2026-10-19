@@ -2,8 +2,8 @@ Run the daily to-do pipeline non-interactively. You are running unattended from 
 
 1. Invoke the Skill tool with skill `01-calendar-todo` and follow its steps exactly as written. Do not improvise, do not skip steps, and do not change how items are grouped.
 2. Check that `outputs/01-calendar-todo/todo_by_name.json` now exists and was written for today. If it was not, print `SCHEDULER_FAIL: module 01 produced no output for today` and stop without going on to step 3.
-3. Invoke the Skill tool with skill `02-whatsapp-message` and follow its steps exactly as written.
-4. Print `SCHEDULER_OK` on its own line, followed by module 01's run summary and module 02's run summary.
+3. Invoke the Skill tool with skill `02-whatsapp-message` and follow its steps exactly as written, adding `--trigger {TRIGGER}` to the `send_whatsapp.py` command it runs.
+4. Print `SCHEDULER_OK` on its own line, followed by the run summary of each module you ran.
 
 Rules for this run:
 - Do not write, create or modify any file outside `outputs/`.

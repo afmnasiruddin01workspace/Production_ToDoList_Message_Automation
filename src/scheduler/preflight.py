@@ -1,7 +1,8 @@
 """03-scheduler: health check run before the pipeline. Read-only except for a refreshed OAuth token.
 
-Prints one JSON object {"ok": bool, "checks": [{id, status, detail, fix}]} and exits non-zero if any
-check failed. Never prints a phone number, a token, or any other .secrets value.
+Prints one JSON object {"ok": bool, "checks": [{id, scope, status, detail, fix}]} and exits non-zero if
+any check failed. v2.0 (R3, R20): every check has a scope - "shared" (needed by everything), "whatsapp"
+or "email" - so the wrapper can let one channel fail without stopping the other. Never prints a phone number, a token, or any other .secrets value.
 
 The Google check deliberately NEVER constructs an InstalledAppFlow: module 01's fetch_tasks.py falls
 back to an interactive browser sign-in when the token is dead, which would hang an unattended run
@@ -13,6 +14,9 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 SCOPES = ["https://www.googleapis.com/auth/tasks.readonly"]
 MIN_FREE_MB = 500
 HOLIDAY = "#holiday@group.v.calendar.google.com"
+SCOPES_BY_ID = {"google_token": "shared", "lists": "shared", "tools": "shared", "disk": "shared", "network": "shared",
+                "contacts": "whatsapp", "wa_session": "whatsapp", "wa_config": "whatsapp", "wa_network": "whatsapp",
+                "email_config": "email"}
 
 
 def check(cid, status, detail, fix=""):
@@ -173,17 +177,72 @@ def disk(repo):
     return check("disk", "ok", f"{free_mb} MB free")
 
 
-def network():
+def _reach(cid, hosts, ok_text):
     down = []
-    for host in ("www.googleapis.com", "web.whatsapp.com"):
+    for host in hosts:
         try:
             socket.create_connection((host, 443), timeout=6).close()
         except OSError:
             down.append(host)
     if down:
-        return check("network", "fail", f"unreachable: {', '.join(down)}",
+        return check(cid, "fail", f"unreachable: {', '.join(down)}",
                      "check the internet connection, VPN or firewall")
-    return check("network", "ok", "googleapis and whatsapp reachable")
+    return check(cid, "ok", ok_text)
+
+
+def network():
+    # v2.0: split from the WhatsApp host so a WhatsApp-only outage cannot stop the email channel (R3).
+    return _reach("network", ("www.googleapis.com",), "googleapis reachable")
+
+
+def wa_network():
+    return _reach("wa_network", ("web.whatsapp.com",), "whatsapp reachable")
+
+
+def email_config(repo, python_exe):
+    """Can module 04 run? Reads only the masked lines `send_email.py --check` prints, and never starts
+    Outlook (R26): module 04 starts it safely itself when it is closed."""
+    script = os.path.join(repo, ".claude", "skills", "04-email-message", "send_email.py")
+    if not os.path.exists(script):
+        return check("email_config", "fail", "module 04 send_email.py missing",
+                     "restore .claude/skills/04-email-message/")
+    try:
+        mod = subprocess.run([python_exe, "-c", "import win32com.client"], capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return check("email_config", "fail", "importing win32com timed out", "run it by hand to see why")
+    if mod.returncode != 0:
+        return check("email_config", "fail", "pywin32 (win32com) is not installed for this Python",
+                     f"{python_exe} -m pip install pywin32")
+    env = dict(os.environ, EMAIL_MODE="live")
+    try:
+        p = subprocess.run([python_exe, script, "--check"], capture_output=True, text=True, env=env, timeout=60,
+                           encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return check("email_config", "fail", "send_email.py --check timed out", "run it by hand to see why")
+    out = p.stdout or ""
+    if p.returncode != 0:
+        lines = [l.strip() for l in (p.stderr or out).strip().splitlines() if l.strip()]
+        return check("email_config", "fail", lines[-1][:160] if lines else f"exit {p.returncode}",
+                     "run send_email.py --check by hand and fix what it reports")
+    for line in out.splitlines():
+        if line.startswith("settings"):
+            return check("email_config", "fail", line.split(":", 1)[1].strip()[:160],
+                         "fix .secrets/email.env (EMAIL_MODE is set per run; check the other keys)")
+        if line.startswith("classic Outlook") and "MISSING" in line:
+            return check("email_config", "fail", "classic Outlook not found (New Outlook has no COM automation)",
+                         "install/repair classic Outlook (Microsoft 365 Apps)")
+        if line.startswith("outlook profile") and "NONE" in line:
+            return check("email_config", "fail", "no Outlook profile found",
+                         "open Outlook once by hand and sign in, or set EMAIL_OUTLOOK_PROFILE in .secrets/email.env")
+        if line.startswith("contacts"):
+            tail = line.split(":", 1)[1].strip()
+            if tail.startswith("send_email"):
+                return check("email_config", "fail", tail[:160], "restore src/EmailContent/EmailContacts.txt (see EmailContacts.sample.txt)")
+            parts = tail.split()
+            valid = int(parts[parts.index("people,") + 1]) if "people," in parts else 0
+            if valid == 0:
+                return check("email_config", "fail", "no contact with a valid address", "fix the 4th field of EmailContacts.txt: one address, then the days")
+    return check("email_config", "ok", "classic Outlook, a profile, settings and contacts usable (Outlook not started)")
 
 
 def main():
@@ -206,9 +265,11 @@ def main():
         ("contacts", lambda: contacts_file(src)),
         ("wa_session", lambda: wa_session(secrets)),
         ("wa_config", lambda: wa_config(repo, secrets, args.python)),
+        ("email_config", lambda: email_config(repo, args.python)),
         ("tools", lambda: tools(args.python)),
         ("disk", lambda: disk(repo)),
         ("network", network),
+        ("wa_network", wa_network),
     ]
     checks = []
     for cid, fn in runners:
@@ -220,6 +281,8 @@ def main():
         except Exception as e:  # a crashing check is a failed check, never a crashed run
             checks.append(check(cid, "fail", f"check crashed: {type(e).__name__}: {e}",
                                 "this is a bug in preflight.py - see the run transcript"))
+    for c in checks:
+        c["scope"] = SCOPES_BY_ID.get(c["id"], "shared")
     ok = all(c["status"] in ("ok", "skipped") for c in checks)
     json.dump({"ok": ok, "checks": checks}, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
