@@ -55,7 +55,7 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | **WhatsApp warns or blocks the number** | Automated sending detected (this is against WhatsApp's terms, a known and accepted risk) | Business app shows a warning | Stop immediately (`WA_MODE=dry-run`), unlink the device, write an incident under `docs/incidents/`, send by hand until decided otherwise |
 
 ## 03-scheduler
-**v1.1: Task Scheduler → `conhost.exe --headless` PowerShell wrapper → headless `claude -p` running skills 01 then 02, now with an atomic lock and manual-Run detection** — see `plan/stableMD/03-scheduler.stable.md` §12 for full detail and the real incidents this table summarizes.
+**v3.0: Task Scheduler → `conhost.exe --headless` PowerShell wrapper → at 10:00 headless `claude -p` running skills 01 then 02; at 13:30 (`SCHED_EMAIL_TIME`) a separate email-only run of module 04, rebuilding the list first if it is missing** — see `plan/stableMD/03-scheduler.stable.md` §12 for full detail and the real incidents this table summarizes.
 
 | Symptom | Likely cause | How to check | Fix |
 |---|---|---|---|
@@ -80,6 +80,11 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | **(v2.0)** A minimised Outlook window appeared at 10:00 and stays open | Outlook was closed and module 04 started it | `outlook_profile_started: true` in module 04's run row | Nothing to fix; close it if you like |
 | **(v2.0)** A toast says "N WhatsApp message(s) not confirmed delivered" or "1 email bounced" | The run delivered, but a receipt is missing or an address is wrong | the toast; `warnings` in the run row | WhatsApp: check the chat on the primary phone, do not re-run. Email bounced: fix the address in `EmailContacts.txt` and resend from the manual UI |
 | **(v2.0)** Job files named `email_job_*` / `wa_job_*` in `%TEMP%` | A killed step never reached its cleanup | the files (they hold real addresses/numbers) | The wrapper now removes them after killing a step; delete any old ones by hand |
+| **(v3.0)** No email went out; the 10:00 row says email `skipped: runs separately at 13:30` | `ToDo-Email-Daily` not installed or disabled, or the laptop was off at 13:30 (it catches up on wake) | `install_task.ps1 -Status`; a toast/warning "email task not installed" in the 10:00 row; no `run_kind: email` row that day | `pwsh -File src/scheduler/install_task.ps1` |
+| **(v3.0)** The 13:30 email run cost money | The 10:00 list was missing or old, so it rebuilt the list (module 01 only) | `verify.list_rebuilt: true` and `claude.total_cost_usd` in the email row | Expected; look at why the 10:00 run failed |
+| **(v3.0)** `email_failed: lock held by pid …` | The lock stayed held for all of `SCHED_EMAIL_LOCK_WAIT_MIN` (a long 10:00 retry chain, or a UI job) | the detail names the holder and its start time | A dead holder's lock is reclaimed automatically; otherwise the retry 15 min later picks it up. Avoid manual WhatsApp sends just before 13:30 |
+| **(v3.0)** The installer says `SCHED_EMAIL_TIME '…' is not a time` or `equals SCHED_TIME` | A typo, or the same time as the 10:00 run | the message; nothing was changed | Use `HH:mm` (e.g. `13:30`) or `off` |
+| **(v3.0)** Want the old single 10:00 run back | — | — | `SCHED_EMAIL_TIME=off` in `scheduler.env`, then `install_task.ps1` (removes the email task) |
 
 ## 04-email-message
 **v1.0: email through the owner's classic Outlook** (COM, no password) with Sent Items proof and bounce detection — see `plan/stableMD/04-email-message.stable.md` §12 for the full table.

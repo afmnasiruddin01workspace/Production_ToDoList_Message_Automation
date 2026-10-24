@@ -10,7 +10,7 @@ Modular chain of Claude Code skills. Each module's output is the next module's i
 |---|---|---|---|
 | 01 | calendar-todo | Google Tasks (all lists, Tasks API) + Google Calendars in `src/calendarLinks/lists.txt` | `outputs/01-calendar-todo/todo_by_name.json` (+ `.md`) |
 | 02 | whatsapp-message | 01 output + `src/messageListNDetails/WhatsappContacts.txt` | `outputs/02-whatsapp-message/send_log.json` |
-| 03 | scheduler | 01 + 02 skills (WhatsApp) and 04 (email, run directly) | `outputs/03-scheduler/run_log.json` (+ per-run transcripts in `logs/`) |
+| 03 | scheduler | 01 + 02 skills (WhatsApp, 10:00) and 04 (email, run directly, 13:30) | `outputs/03-scheduler/run_log.json` (+ per-run transcripts in `logs/`) |
 | 04 | email-message | 01 output + `src/EmailContent/EmailContacts.txt` | `outputs/04-email-message/send_log.json` + shared `outputs/delivery/delivery_log.json` |
 | 05 | manual-ui | 01 output + both contact files + 02/04/ledger logs | local page on 127.0.0.1 (`src/ui/`) that runs 02 and 04 by hand; `outputs/05-manual-ui/` |
 
@@ -53,14 +53,16 @@ python .claude/skills/02-whatsapp-message/send_whatsapp.py --today YYYY-MM-DD   
 python .claude/skills/01-calendar-todo/fetch_tasks.py --today YYYY-MM-DD    # Tasks API read (module 01 step)
 python src/scheduler/preflight.py                                           # the scheduler's 10 health checks
 pwsh -File src/scheduler/run_daily.ps1 -Trigger manual -Mode dry-run        # safe full-pipeline test (never sends)
+pwsh -File src/scheduler/run_daily.ps1 -Trigger manual -Mode dry-run -Channel email   # the 13:30 email run alone
 src/ui/start_ui.cmd [--stop]                                                 # manual-send web page (loopback only)
-pwsh -File src/scheduler/install_task.ps1 [-Status|-Uninstall]              # (re)register / inspect / remove the daily task
+pwsh -File src/scheduler/install_task.ps1 [-Status|-Uninstall]              # (re)register / inspect / remove both daily tasks
 ```
 Module 02 deps: `cd .claude/skills/02-whatsapp-message && npm install`. Config: `.secrets/whatsapp.env`, `src/scheduler/scheduler.env` (copy from the `.sample`).
 
 ## Architecture notes (need several files to see)
 - **Module 01 is agentic, 02 is deterministic.** 01 is Claude following its SKILL.md (Calendar connector for events + `fetch_tasks.py` for Tasks). 02 only runs `send_whatsapp.py`, which shells out to `wa_send.js` (`whatsapp-web.js`). That is why the scheduler must drive a headless `claude -p` session rather than call scripts.
 - **Module 03 wrapper** (`src/scheduler/run_daily.ps1`): atomic lock (`run.lock`) → `preflight.py` → headless `claude -p` with `prompt.txt`, forced `WA_MODE=live`, `--settings scheduler.settings.json` → verify **from artifacts** (`todo_by_name.json` dated today, `send_log.json` has a `live` row for today), never from exit codes → append `run_log.json` → alert (`notify.py`) only once retries are exhausted.
+- **Two tasks, two run kinds (03 v3.0).** `ToDo-WhatsApp-Daily` (10:00, `SCHED_TIME`) runs modules 01+02 only (`run_kind: whatsapp`); `ToDo-Email-Daily` (13:30, `SCHED_EMAIL_TIME`) runs `run_daily.ps1 -Channel email` (`run_kind: email`), which rebuilds a missing list with a module-01-only Claude session (`WA_MODE=dry-run` forced) and waits for a held lock instead of skipping. Each kind has its own attempt ladder (rows without `run_kind` count as `all`). `SCHED_EMAIL_TIME=off` = v2.0's single run; re-run `install_task.ps1` after changing either time.
 - **Retries live inside `run_daily.ps1`** (sleep 15 min, re-invoke itself), not in Task Scheduler's `RestartCount`: the task launches via `conhost.exe --headless`, which swallows the child's exit code. Do not "simplify" this to `-WindowStyle Hidden` (ignored on Windows 11; a visible window killed a real run).
 - **`trigger` label.** A Task Scheduler launch outside the `SCHED_TIME` window is relabelled `manual-gui`: it runs, alerts immediately, never self-retries. A missed-run catch-up is recognised from Task Scheduler's event 114 and labelled `catch-up` (a scheduled run: keeps its retries); the launch is classified from the Operational log (107 `schedule`, 114 `catch-up`, 110 `manual-gui`), with the clock window only as a fallback.
 - **`send_log.json` holds several runs per date**; always select by `date` **and** `mode`. The idempotency guard counts only `live` rows. Statuses `sent`, `already_sent`, `unconfirmed` all block re-sending — an ambiguous timeout is never auto-retried, so nobody is messaged twice.

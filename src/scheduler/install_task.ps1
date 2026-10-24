@@ -1,7 +1,9 @@
 <#
-  03-scheduler: register / update / remove the daily scheduled task (R1, R14).
+  03-scheduler: register / update / remove the daily scheduled tasks (R1, R14, R28).
 
-  Idempotent - running it twice leaves exactly one task.
+  Idempotent - running it twice leaves exactly one of each task:
+      ToDo-WhatsApp-Daily  at SCHED_TIME        (module 01 + WhatsApp; + email when SCHED_EMAIL_TIME=off)
+      ToDo-Email-Daily     at SCHED_EMAIL_TIME  (v3.0: email only; removed when SCHED_EMAIL_TIME=off)
 
       pwsh -File src/scheduler/install_task.ps1              # install or update
       pwsh -File src/scheduler/install_task.ps1 -Uninstall    # switch the automation off
@@ -18,42 +20,64 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$TaskName  = 'ToDo-WhatsApp-Daily'
+# SCHED_INSTALL_SUFFIX is a test-only hook: it registers the tasks under other names, so the installer
+# can be tested without touching the real ones. Never set in normal operation.
+$TaskName      = 'ToDo-WhatsApp-Daily' + $env:SCHED_INSTALL_SUFFIX
+$EmailTaskName = 'ToDo-Email-Daily' + $env:SCHED_INSTALL_SUFFIX
 $SchedDir  = $PSScriptRoot
 $RepoRoot  = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Runner    = Join-Path $SchedDir 'run_daily.ps1'
 
 if ($Status) {
-    $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if (-not $t) { Write-Host "not installed"; exit 0 }
-    $info = $t | Get-ScheduledTaskInfo
-    Write-Host "task      : $TaskName ($($t.State))"
-    Write-Host "trigger   : $(($t.Triggers | ForEach-Object { $_.StartBoundary }) -join ', ')"
-    Write-Host "last run  : $($info.LastRunTime)  result 0x$('{0:X}' -f $info.LastTaskResult)"
-    Write-Host "next run  : $($info.NextRunTime)"
+    foreach ($name in $TaskName, $EmailTaskName) {
+        $t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if (-not $t) { Write-Host "task      : $name (not installed)"; Write-Host ""; continue }
+        $info = $t | Get-ScheduledTaskInfo
+        Write-Host "task      : $name ($($t.State))"
+        Write-Host "trigger   : $(($t.Triggers | ForEach-Object { $_.StartBoundary }) -join ', ')"
+        Write-Host "last run  : $($info.LastRunTime)  result 0x$('{0:X}' -f $info.LastTaskResult)"
+        Write-Host "next run  : $($info.NextRunTime)"
+        Write-Host ""
+    }
     exit 0
 }
 
 if ($Uninstall) {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Host "removed scheduled task '$TaskName'. Logs and outputs are untouched."
-    } else {
-        Write-Host "'$TaskName' was not installed - nothing to do."
+    foreach ($name in $TaskName, $EmailTaskName) {
+        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+            Write-Host "removed scheduled task '$name'. Logs and outputs are untouched."
+        } else {
+            Write-Host "'$name' was not installed - nothing to do."
+        }
     }
     exit 0
 }
 
-# ---- time comes from scheduler.env unless overridden on the command line
-if (-not $Time) {
-    $envFile = Join-Path $SchedDir 'scheduler.env'
-    if (Test-Path $envFile) {
-        foreach ($line in Get-Content $envFile) {
-            if ($line -match '^\s*SCHED_TIME\s*=\s*(.+?)\s*$') { $Time = $Matches[1].Trim('"').Trim("'") }
-        }
+# ---- times come from scheduler.env (SCHED_TIME unless overridden on the command line)
+$EmailTime = ''
+$envFile = Join-Path $SchedDir 'scheduler.env'
+if (Test-Path $envFile) {
+    foreach ($line in Get-Content $envFile) {
+        if (-not $Time -and $line -match '^\s*SCHED_TIME\s*=\s*(.+?)\s*$') { $Time = $Matches[1].Trim('"').Trim("'") }
+        if ($line -match '^\s*SCHED_EMAIL_TIME\s*=\s*(.+?)\s*$') { $EmailTime = $Matches[1].Trim('"').Trim("'") }
     }
 }
 if (-not $Time) { $Time = '10:00' }
+if (-not $EmailTime) { $EmailTime = '13:30' }   # the wrapper's default too (R27)
+
+# R27: refuse a bad email time before changing anything, so a typo cannot silently lose the email channel.
+if ($EmailTime -ne 'off') {
+    $parsed = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($EmailTime, 'HH:mm', $null, 'None', [ref]$parsed)) {
+        Write-Host "SCHED_EMAIL_TIME '$EmailTime' is not a time (HH:mm, e.g. 13:30) or 'off' - nothing changed"
+        exit 1
+    }
+    if ($parsed.TimeOfDay -eq ([datetime]::ParseExact($Time, 'HH:mm', $null)).TimeOfDay) {
+        Write-Host "SCHED_EMAIL_TIME equals SCHED_TIME ($Time) - use 'off' to send email in the $Time run; nothing changed"
+        exit 1
+    }
+}
 
 if (-not (Test-Path $Runner)) { throw "runner not found: $Runner" }
 # Resolving pwsh needs care. On a Store/winget install, `Get-Command pwsh` returns the
@@ -78,9 +102,8 @@ Write-Host "launcher   : $pwsh"
 # Windows Terminal window anyway (seen 2026-09-20 in T18), and closing it kills the run with
 # 0xC000013A. `conhost.exe --headless` never creates a window at all.
 $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
-$action = New-ScheduledTaskAction -Execute $conhost `
-    -Argument "--headless `"$pwsh`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Runner`" -Trigger schedule" `
-    -WorkingDirectory $RepoRoot
+$runArgs = "--headless `"$pwsh`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Runner`" -Trigger schedule"
+$action = New-ScheduledTaskAction -Execute $conhost -Argument $runArgs -WorkingDirectory $RepoRoot
 
 $trigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact($Time, 'HH:mm', $null))
 
@@ -102,6 +125,24 @@ if ($existing) {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
         -Description 'Runs the calendar-todo -> WhatsApp pipeline via headless Claude Code. See plan/stableMD/03-scheduler.stable.md' | Out-Null
     Write-Host "installed scheduled task '$TaskName' - daily at $Time"
+}
+
+# ---- v3.0 (R28): the separate email task, same settings, -Channel email
+if ($EmailTime -ne 'off') {
+    $emailAction  = New-ScheduledTaskAction -Execute $conhost -Argument "$runArgs -Channel email" -WorkingDirectory $RepoRoot
+    $emailTrigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact($EmailTime, 'HH:mm', $null))
+    if (Get-ScheduledTask -TaskName $EmailTaskName -ErrorAction SilentlyContinue) {
+        Set-ScheduledTask -TaskName $EmailTaskName -Action $emailAction -Trigger $emailTrigger -Settings $settings -Principal $principal | Out-Null
+        Write-Host "updated scheduled task '$EmailTaskName' - daily at $EmailTime"
+    } else {
+        Register-ScheduledTask -TaskName $EmailTaskName -Action $emailAction -Trigger $emailTrigger -Settings $settings -Principal $principal `
+            -Description 'Sends the to-do list by email (module 04) at its own time. See plan/stableMD/03-scheduler.stable.md' | Out-Null
+        Write-Host "installed scheduled task '$EmailTaskName' - daily at $EmailTime"
+    }
+}
+elseif (Get-ScheduledTask -TaskName $EmailTaskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $EmailTaskName -Confirm:$false
+    Write-Host "removed scheduled task '$EmailTaskName' - SCHED_EMAIL_TIME=off, email goes out in the $Time run"
 }
 
 Write-Host ""

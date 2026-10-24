@@ -4,8 +4,14 @@
   Lock -> classify launch -> pre-flight -> WhatsApp channel (headless Claude: skills 01 then 02)
        -> email channel (module 04, run directly) -> verify each channel's artifacts -> log -> alert.
 
+  v3.0 (R27-R32): with SCHED_EMAIL_TIME set (default 13:30) email has its own run. The 10:00 task runs
+  WhatsApp only (-Channel auto -> run_kind whatsapp); the second task ToDo-Email-Daily runs
+  -Channel email: lock (waiting if held) -> pre-flight -> today's list, rebuilt by a module-01-only
+  Claude session if missing -> email step -> verify. SCHED_EMAIL_TIME=off keeps the v2.0 single run.
+
   Runnable by hand with exactly the same behaviour as the scheduled run (R13):
       pwsh -File src/scheduler/run_daily.ps1 -Trigger manual -Mode dry-run -Visible
+      pwsh -File src/scheduler/run_daily.ps1 -Trigger manual -Mode dry-run -Channel email
 
   Every path is derived from $PSScriptRoot, never from the current directory, so it behaves
   identically whichever way it is launched - and a copy of this folder inside a scratch repo is a
@@ -16,6 +22,7 @@
       SCHED_LAUNCH_TASK / _REF / _LOG   aim the classifier at another task name, reference time or log
       SCHED_PREFLIGHT_SKIP              comma-separated pre-flight check ids to skip
       SCHED_CLAUDE_EXE                  swap in a stub for `claude`
+      SCHED_EMAIL_TASK                  aim the R32 "email task installed?" check at another task name
   Every SCHED_* setting may be given as an environment variable; it overrides scheduler.env.
 #>
 [CmdletBinding()]
@@ -24,6 +31,9 @@ param(
     [ValidateSet('dry-run', 'self', 'live')][string]$Mode = '',
     # v2.0 (R18): a self-retry continues the label it ended with; no Task Scheduler event announces it.
     [ValidateSet('schedule', 'catch-up')][string]$ContinueFrom = '',
+    # v3.0 (R29): which channels this run delivers. auto = whatsapp for a scheduled launch when email has
+    # its own time, otherwise all.
+    [ValidateSet('auto', 'all', 'whatsapp', 'email')][string]$Channel = 'auto',
     [switch]$ClassifyOnly,
     [switch]$Visible,
     [switch]$SkipPreflight
@@ -80,7 +90,28 @@ $SchedEmail      = (Get-Setting 'SCHED_EMAIL' '1') -ne '0'
 $EmailTimeoutMin = [double](Get-Setting 'SCHED_EMAIL_TIMEOUT_MIN' '10')
 $RetryWaitSec    = [int](Get-Setting 'SCHED_RETRY_WAIT_SEC' '900')
 $ShowWindow      = $Visible -or ((Get-Setting 'SCHED_VISIBLE' '0') -eq '1')
+$EmailLockWaitMin = [double](Get-Setting 'SCHED_EMAIL_LOCK_WAIT_MIN' '30')
 if (-not $Mode) { $Mode = 'live' }   # R4: the scheduled run always forces live
+
+# v3.0 (R27): the separate email time. 'off' keeps v2.0's single run. A value that does not parse, or
+# equals SCHED_TIME, is treated as off with a warning, so a typo cannot silently lose the email channel.
+$SchedTimeStr = Get-Setting 'SCHED_TIME' '10:00'
+$EmailTimeStr = Get-Setting 'SCHED_EMAIL_TIME' '13:30'
+$EmailTimeBad = $false
+$SplitEmail   = $false
+if ($EmailTimeStr -ne 'off') {
+    try {
+        $et = [datetime]::ParseExact($EmailTimeStr, 'HH:mm', $null)
+        $st = [datetime]::ParseExact($SchedTimeStr, 'HH:mm', $null)
+        if ($et.TimeOfDay -eq $st.TimeOfDay) { $EmailTimeBad = $true } else { $SplitEmail = $true }
+    } catch { $EmailTimeBad = $true }
+}
+
+# v3.0 (R29): resolve the run kind once; it is stored as run_kind and passed on to a self-retry.
+$RunKind = $Channel
+if ($RunKind -eq 'auto') {
+    $RunKind = if ($Trigger -eq 'schedule' -and $SplitEmail) { 'whatsapp' } else { 'all' }
+}
 
 $channels = @()
 if ((Get-Setting 'SCHED_ALERT_TOAST'    '1') -ne '0') { $channels += 'toast' }
@@ -136,8 +167,9 @@ function Get-LaunchReason([string]$TaskName, [datetime]$Ref) {
     return @{ label = $null; event = 'none' }
 }
 
-$SchedTimeStr = Get-Setting 'SCHED_TIME' '10:00'
-$SchedToday   = $Started.Date.Add(([datetime]::ParseExact($SchedTimeStr, 'HH:mm', $null)).TimeOfDay)
+# v3.0 (R31): an email run is classified against its own task and its own time.
+$WindowTimeStr = if ($RunKind -eq 'email' -and $SplitEmail) { $EmailTimeStr } else { $SchedTimeStr }
+$SchedToday   = $Started.Date.Add(([datetime]::ParseExact($WindowTimeStr, 'HH:mm', $null)).TimeOfDay)
 $WindowStart  = $SchedToday.AddMinutes(-5)
 $WindowEnd    = $SchedToday.AddMinutes(15 * ($MaxAttempts - 1) + 20)   # covers every self-retry plus slack
 
@@ -147,7 +179,8 @@ if ($ContinueFrom) {
     $EffectiveTrigger = $ContinueFrom; $LaunchEvent = 'continuation'
 }
 elseif ($Trigger -eq 'schedule') {
-    $taskName = if ($env:SCHED_LAUNCH_TASK) { $env:SCHED_LAUNCH_TASK } else { '\ToDo-WhatsApp-Daily' }
+    $taskName = if ($env:SCHED_LAUNCH_TASK) { $env:SCHED_LAUNCH_TASK }
+                elseif ($RunKind -eq 'email') { '\ToDo-Email-Daily' } else { '\ToDo-WhatsApp-Daily' }
     $refTime  = if ($env:SCHED_LAUNCH_REF)  { [datetime]::Parse($env:SCHED_LAUNCH_REF) } else { $Started }
     $reason   = Get-LaunchReason $taskName $refTime
     if ($reason.label) {
@@ -159,7 +192,7 @@ elseif ($Trigger -eq 'schedule') {
     elseif ($Started -lt $WindowStart -or $Started -gt $WindowEnd) {
         # v1.1 (R16) window rule, now only the fallback for when the event log has nothing to say.
         $EffectiveTrigger = 'manual-gui'
-        Write-Host "note: launched via Task Scheduler but well outside the $SchedTimeStr window - treating as manual-gui, not schedule"
+        Write-Host "note: launched via Task Scheduler but well outside the $WindowTimeStr window - treating as manual-gui, not schedule"
     }
 }
 # A catch-up run is a scheduled run in every respect: lock, attempt ladder, quiet until the last
@@ -169,7 +202,7 @@ $IsScheduled = $EffectiveTrigger -in @('schedule', 'catch-up')
 $ModuleTrigger = if ($IsScheduled) { 'schedule' } else { 'manual' }
 
 if ($ClassifyOnly) {
-    @{ trigger = $EffectiveTrigger; launch_event = $LaunchEvent } | ConvertTo-Json -Compress | Write-Output
+    @{ trigger = $EffectiveTrigger; launch_event = $LaunchEvent; run_kind = $RunKind } | ConvertTo-Json -Compress | Write-Output
     exit 0
 }
 
@@ -198,11 +231,13 @@ function Save-Run([hashtable]$Entry) {
 function Get-AttemptNumber {
     # The attempt number is derived from today's already-failed scheduled runs (R11: alert only once
     # the last attempt has failed). A catch-up run counts like a schedule run (R17, R18); a manual-gui
-    # launch never joins the schedule day's attempt ladder (v1.1, R16).
+    # launch never joins the schedule day's attempt ladder (v1.1, R16). v3.0 (R31): each run kind has its
+    # own ladder; a row written before v3.0 has no run_kind and counts as `all`.
     if (-not $IsScheduled) { return 1 }
     $runs = @((Get-RunLog).runs)
     $failedToday = @($runs | Where-Object {
-        $_.date -eq $Today -and $_.trigger -in @('schedule', 'catch-up') -and
+        $kind = if ($_.run_kind) { [string]$_.run_kind } else { 'all' }
+        $_.date -eq $Today -and $_.trigger -in @('schedule', 'catch-up') -and $kind -eq $RunKind -and
         $_.status -notin @('ok', 'ok_nothing_to_send', 'skipped_locked')
     })
     return $failedToday.Count + 1
@@ -291,7 +326,27 @@ try {
     # WhatsApp message or a popup window - those are reserved for things that need the owner.
     # Note there is exactly one Save-Run in this script, in the finally block: an `exit` here
     # would still run finally and write the row a second time.
-    if (-not (Try-AcquireLock)) {
+    $gotLock = Try-AcquireLock
+    if (-not $gotLock -and $RunKind -eq 'email') {
+        # v3.0 (R30): an email run waits for the holder (a late 10:00 run, a module 05 job) instead of
+        # skipping, because a skipped email run would lose the day. Still held afterwards -> a failure.
+        $deadline = (Get-Date).AddMinutes($EmailLockWaitMin)
+        Write-Host "lock held - the email run waits up to $EmailLockWaitMin minute(s)"
+        while (-not $gotLock -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds ([Math]::Max(1, [Math]::Min(30, ($deadline - (Get-Date)).TotalSeconds)))
+            $gotLock = Try-AcquireLock
+        }
+        if (-not $gotLock) {
+            $held = Test-Lock
+            $status = 'email_failed'
+            $errorText = if ($held) { "lock held by pid $($held.pid) (started $($held.started)) for all of $EmailLockWaitMin minute(s)" }
+                         else { "the lock stayed held for all of $EmailLockWaitMin minute(s)" }
+            $chan.email = @{ status = 'failed'; detail = $errorText }
+            $chan.whatsapp = @{ status = 'skipped'; detail = "runs at $SchedTimeStr" }
+            return
+        }
+    }
+    if (-not $gotLock) {
         $status = 'skipped_locked'
         $held = Test-Lock
         $errorText = if ($held) { "another run (pid $($held.pid)) started $($held.started) is still going" }
@@ -302,13 +357,28 @@ try {
     }
     $lockTaken = $true
 
+    $todoToday = (Test-Path $TodoJson) -and ((Get-Item $TodoJson).LastWriteTime.ToString('yyyy-MM-dd') -eq $Today)
+    if ($RunKind -eq 'email') {
+        $chan.whatsapp = @{ status = 'skipped'; detail = "runs at $SchedTimeStr" }
+        $verify.list_rebuilt = $false
+        if (-not $SchedEmail) {
+            # R30: switched off - nothing is rebuilt (no money spent) and nothing is sent.
+            $chan.email = @{ status = 'skipped'; detail = 'switched off (SCHED_EMAIL=0)' }
+            $status = 'ok_nothing_to_send'
+            return
+        }
+    }
+
     # 2 -------------------------------------------------------- pre-flight (R3, R20)
     # Each check has a scope. A `shared` failure means there can be no list, so nothing starts. A
     # `whatsapp` or `email` failure only switches that one channel off; the other still runs.
     $waPreflightBad = @(); $emailPreflightBad = @()
     if (-not $SkipPreflight) {
         $pfArgs = @('--repo', $RepoRoot, '--python', $PythonExe)
-        if ($env:SCHED_PREFLIGHT_SKIP) { $pfArgs += @('--skip', $env:SCHED_PREFLIGHT_SKIP) }
+        # v3.0 (R30): an email run never uses WhatsApp, so its checks are not run at all.
+        $skipIds = @($env:SCHED_PREFLIGHT_SKIP -split ',' | Where-Object { $_ })
+        if ($RunKind -eq 'email') { $skipIds += @('contacts', 'wa_session', 'wa_config', 'wa_network') }
+        if ($skipIds.Count -gt 0) { $pfArgs += @('--skip', ($skipIds -join ',')) }
         $pfRaw = & $PythonExe (Join-Path $SchedDir 'preflight.py') @pfArgs 2>&1
         $pfOk  = ($LASTEXITCODE -eq 0)
         try { $preflight = ($pfRaw | Out-String | ConvertFrom-Json) } catch { $preflight = $null }
@@ -321,15 +391,26 @@ try {
             $sharedBad = @($bad | Where-Object { -not $_.scope -or $_.scope -eq 'shared' })
             $waPreflightBad    = @($bad | Where-Object { $_.scope -eq 'whatsapp' } | ForEach-Object { & $fmt $_ })
             $emailPreflightBad = @($bad | Where-Object { $_.scope -eq 'email' }    | ForEach-Object { & $fmt $_ })
-            if ($sharedBad.Count -gt 0) {
+            if ($sharedBad.Count -gt 0 -and $RunKind -eq 'email' -and $todoToday) {
+                # v3.0 (R30): the shared checks only matter for rebuilding the list, and today's exists.
+                foreach ($c in $sharedBad) { $warnings += "pre-flight $($c.id) failed (not needed: today's list exists)" }
+            }
+            elseif ($sharedBad.Count -gt 0) {
                 $status = 'preflight_failed'
                 $errorText = ($sharedBad | ForEach-Object { & $fmt $_ }) -join "`n"
                 throw 'preflight'
             }
         }
     }
+    if ($RunKind -eq 'email' -and $emailPreflightBad.Count -gt 0) {
+        # R30: nothing could be sent, so the list is not rebuilt either (no money spent).
+        $status = 'email_preflight_failed'; $errorText = $emailPreflightBad -join "`n"
+        $chan.email = @{ status = 'preflight_failed'; detail = $errorText }
+        return
+    }
 
     # 3 -------------------------------------------------------- WhatsApp channel: module 01 then 02 (R4-R7, R20, R24)
+    # v3.0 (R30): in an email run this step only rebuilds a missing list - module 01 alone, never 02.
     $promptFile   = Join-Path $SchedDir 'prompt.txt'
     $settingsFile = Join-Path $SchedDir 'scheduler.settings.json'
     $transcript   = Join-Path $LogsDir "$Stamp.json"
@@ -338,120 +419,135 @@ try {
 
     $env:WA_MODE    = $Mode     # R4 - child environment only; the .env files on disk are never modified
     $env:EMAIL_MODE = $Mode
+    # v3.0 (R30): a second guard for the email run's rebuild - even an off-script session cannot send WhatsApp.
+    if ($RunKind -eq 'email') { $env:WA_MODE = 'dry-run' }
 
     # R24 + R20: a per-run copy of the prompt, with the trigger label filled in and - when the WhatsApp
-    # pre-flight scope failed - module 02 switched off (module 01 still runs: email needs its list).
-    $skipWhatsApp = $waPreflightBad.Count -gt 0
+    # pre-flight scope failed, or this is an email run - module 02 switched off (module 01 still runs:
+    # email needs its list).
+    $skipWhatsApp  = $waPreflightBad.Count -gt 0
+    $moduleOneOnly = $skipWhatsApp -or $RunKind -eq 'email'
+    $runClaude     = -not ($RunKind -eq 'email' -and $todoToday)
     $promptText = (Get-Content $promptFile -Raw -Encoding UTF8).Replace('{TRIGGER}', $ModuleTrigger)
-    if ($skipWhatsApp) {
+    if ($moduleOneOnly) {
         $promptText = $promptText -replace '(?m)^3\. .*$', '3. Do NOT run module 02 this time: WhatsApp is unavailable and this is deliberate. Skip this step.'
     }
     Set-Content -Path $promptRun -Value $promptText -Encoding UTF8
 
     $waStatus = 'ok'; $waError = $null
-    try {
-        # Two things matter here and both have bitten us:
-        #  - Start-Process -ArgumentList joins with spaces and quotes NOTHING, so every path
-        #    containing a space (this repo's does) must be quoted by hand.
-        #  - The prompt is multi-line, so it goes in on stdin rather than as an argument;
-        #    `claude -p` with no prompt argument reads it from there.
-        # --permission-mode manual + --permission-prompts none is what actually RESTRICTS this run.
-        # `permissions.allow` is only an auto-approve list: on its own it does not stop anything (T10).
-        $argString = '-p --settings "{0}" --model {1} --permission-mode manual --permission-prompts none --output-format json' -f $settingsFile, $Model
-        $claudeStartedAt = Get-Date
-        $proc = Start-Process -FilePath $ClaudeExe -ArgumentList $argString `
-                    -WorkingDirectory $RepoRoot -NoNewWindow -PassThru `
-                    -RedirectStandardInput $promptRun `
-                    -RedirectStandardOutput $transcript -RedirectStandardError $errFile
-
-        if (-not $proc.WaitForExit([int]($TimeoutMin * 60 * 1000))) {          # R6
-            try { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null } catch { }
-            Remove-StaleJobFiles $claudeStartedAt
-            $waStatus = 'timeout'
-            $waError = "the run passed its $TimeoutMin-minute limit and was killed. " +
-                       "Most likely an unattended Google sign-in prompt or a hung Chrome - see $transcript"
-            throw 'timeout'
-        }
-
-        $claudeExit = $proc.ExitCode
-        $envelope = $null
-        if (Test-Path $transcript) {
-            try { $envelope = Get-Content $transcript -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
-        }
-        # The headless envelope carries `permission_denials`, the most useful clue when a run fails.
-        # Record just the tool names and the commands, truncated - never the whole tool_input.
-        $denials = @()
-        if ($envelope -and $envelope.permission_denials) {
-            foreach ($d in @($envelope.permission_denials)) {
-                $what = if ($d.tool_input.command) { [string]$d.tool_input.command }
-                        elseif ($d.tool_input.file_path) { [string]$d.tool_input.file_path }
-                        else { '' }
-                if ($what.Length -gt 300) { $what = $what.Substring(0, 300) + '...' }
-                $denials += @{ tool = [string]$d.tool_name; detail = $what }
-            }
-        }
-        $claudeInfo = @{
-            exit_code         = $claudeExit
-            num_turns         = if ($envelope) { $envelope.num_turns } else { $null }
-            total_cost_usd    = if ($envelope) { $envelope.total_cost_usd } else { $null }
-            session_id        = if ($envelope) { $envelope.session_id } else { $null }
-            transcript        = "logs/$Stamp.json"
-            permission_denials = $denials
-        }
-        $resultText = if ($envelope) { [string]$envelope.result } else { '' }
-
-        if ($claudeExit -ne 0 -or $resultText -match 'SCHEDULER_FAIL') {
-            $waStatus = 'claude_failed'
-            $reason = if ($resultText -match 'SCHEDULER_FAIL:\s*(.+)') { $Matches[1] } else { "claude exited $claudeExit" }
-            $waError = "$reason`n  transcript: logs/$Stamp.json"
-            throw 'claude'
-        }
-
-        # 4 ----------------------------------------------------- verify artifacts, not exit codes (R8)
-        if (-not (Test-Path $TodoJson)) {
-            $waStatus = 'verify_failed'; $waError = 'module 01 wrote no todo_by_name.json'; throw 'verify'
-        }
-        $todoDate = (Get-Item $TodoJson).LastWriteTime.ToString('yyyy-MM-dd')
-        if ($todoDate -ne $Today) {
-            $waStatus = 'verify_failed'
-            $waError = "todo_by_name.json is from $todoDate, not today ($Today) - module 01 did not run"
-            throw 'verify'
-        }
+    if (-not $runClaude) {
+        # v3.0 (R30): the email run found today's list - no Claude session, no cost.
         $todo = Get-Content $TodoJson -Raw -Encoding UTF8 | ConvertFrom-Json
         $groups = @($todo.PSObject.Properties)
         $itemCount = 0; foreach ($g in $groups) { $itemCount += @($g.Value).Count }
-        $verify.todo_date = $todoDate; $verify.todo_groups = $groups.Count; $verify.todo_items = $itemCount
+        $verify.todo_date = $Today; $verify.todo_groups = $groups.Count; $verify.todo_items = $itemCount
+    }
+    else {
+        if ($RunKind -eq 'email') { $verify.list_rebuilt = $true; Write-Host "no list dated $Today - rebuilding it (module 01 only)" }
+        try {
+            # Two things matter here and both have bitten us:
+            #  - Start-Process -ArgumentList joins with spaces and quotes NOTHING, so every path
+            #    containing a space (this repo's does) must be quoted by hand.
+            #  - The prompt is multi-line, so it goes in on stdin rather than as an argument;
+            #    `claude -p` with no prompt argument reads it from there.
+            # --permission-mode manual + --permission-prompts none is what actually RESTRICTS this run.
+            # `permissions.allow` is only an auto-approve list: on its own it does not stop anything (T10).
+            $argString = '-p --settings "{0}" --model {1} --permission-mode manual --permission-prompts none --output-format json' -f $settingsFile, $Model
+            $claudeStartedAt = Get-Date
+            $proc = Start-Process -FilePath $ClaudeExe -ArgumentList $argString `
+                        -WorkingDirectory $RepoRoot -NoNewWindow -PassThru `
+                        -RedirectStandardInput $promptRun `
+                        -RedirectStandardOutput $transcript -RedirectStandardError $errFile
 
-        $sentCount = 0; $failedCount = 0; $skippedCount = 0; $sendDate = $null
-        if (-not $skipWhatsApp -and $Mode -eq 'live') {
-            if (-not (Test-Path $SendLog)) {
-                $waStatus = 'verify_failed'; $waError = 'module 02 wrote no send_log.json'; throw 'verify'
+            if (-not $proc.WaitForExit([int]($TimeoutMin * 60 * 1000))) {          # R6
+                try { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null } catch { }
+                Remove-StaleJobFiles $claudeStartedAt
+                $waStatus = 'timeout'
+                $waError = "the run passed its $TimeoutMin-minute limit and was killed. " +
+                           "Most likely an unattended Google sign-in prompt or a hung Chrome - see $transcript"
+                throw 'timeout'
             }
-            $todayRuns = Read-TodayRuns $SendLog 'live'
-            if ($todayRuns.Count -eq 0) {
+
+            $claudeExit = $proc.ExitCode
+            $envelope = $null
+            if (Test-Path $transcript) {
+                try { $envelope = Get-Content $transcript -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+            }
+            # The headless envelope carries `permission_denials`, the most useful clue when a run fails.
+            # Record just the tool names and the commands, truncated - never the whole tool_input.
+            $denials = @()
+            if ($envelope -and $envelope.permission_denials) {
+                foreach ($d in @($envelope.permission_denials)) {
+                    $what = if ($d.tool_input.command) { [string]$d.tool_input.command }
+                            elseif ($d.tool_input.file_path) { [string]$d.tool_input.file_path }
+                            else { '' }
+                    if ($what.Length -gt 300) { $what = $what.Substring(0, 300) + '...' }
+                    $denials += @{ tool = [string]$d.tool_name; detail = $what }
+                }
+            }
+            $claudeInfo = @{
+                exit_code         = $claudeExit
+                num_turns         = if ($envelope) { $envelope.num_turns } else { $null }
+                total_cost_usd    = if ($envelope) { $envelope.total_cost_usd } else { $null }
+                session_id        = if ($envelope) { $envelope.session_id } else { $null }
+                transcript        = "logs/$Stamp.json"
+                permission_denials = $denials
+            }
+            $resultText = if ($envelope) { [string]$envelope.result } else { '' }
+
+            if ($claudeExit -ne 0 -or $resultText -match 'SCHEDULER_FAIL') {
+                $waStatus = 'claude_failed'
+                $reason = if ($resultText -match 'SCHEDULER_FAIL:\s*(.+)') { $Matches[1] } else { "claude exited $claudeExit" }
+                $waError = "$reason`n  transcript: logs/$Stamp.json"
+                throw 'claude'
+            }
+
+            # 4 ----------------------------------------------------- verify artifacts, not exit codes (R8)
+            if (-not (Test-Path $TodoJson)) {
+                $waStatus = 'verify_failed'; $waError = 'module 01 wrote no todo_by_name.json'; throw 'verify'
+            }
+            $todoDate = (Get-Item $TodoJson).LastWriteTime.ToString('yyyy-MM-dd')
+            if ($todoDate -ne $Today) {
                 $waStatus = 'verify_failed'
-                $waError = "send_log.json has no live run for $Today - module 02 did not send"
+                $waError = "todo_by_name.json is from $todoDate, not today ($Today) - module 01 did not run"
                 throw 'verify'
             }
-            $sendDate = $Today
-            # Aggregate across the day's rows: on a retry the newest row can legitimately show sent=0
-            # because attempt 1 already delivered.
-            $sentCount = Sum-Field $todayRuns 'sent'; $failedCount = Sum-Field $todayRuns 'failed'
-            $skippedCount = Sum-Field $todayRuns 'skipped'
-        }
-        $verify.send_log_date = $sendDate; $verify.sent = $sentCount; $verify.failed = $failedCount; $verify.skipped = $skippedCount
+            $todo = Get-Content $TodoJson -Raw -Encoding UTF8 | ConvertFrom-Json
+            $groups = @($todo.PSObject.Properties)
+            $itemCount = 0; foreach ($g in $groups) { $itemCount += @($g.Value).Count }
+            $verify.todo_date = $todoDate; $verify.todo_groups = $groups.Count; $verify.todo_items = $itemCount
 
-        # R9 - a run where nobody was due is a success, not a failure
-        if (-not $skipWhatsApp -and $Mode -eq 'live' -and $sentCount -eq 0 -and $failedCount -eq 0) { $waStatus = 'ok_nothing_to_send' }
-        else { $waStatus = 'ok' }
-    }
-    catch {
-        if ($waStatus -eq 'ok') { $waStatus = 'claude_failed'; $waError = "$_" }
+            $sentCount = 0; $failedCount = 0; $skippedCount = 0; $sendDate = $null
+            if (-not $moduleOneOnly -and $Mode -eq 'live') {
+                if (-not (Test-Path $SendLog)) {
+                    $waStatus = 'verify_failed'; $waError = 'module 02 wrote no send_log.json'; throw 'verify'
+                }
+                $todayRuns = Read-TodayRuns $SendLog 'live'
+                if ($todayRuns.Count -eq 0) {
+                    $waStatus = 'verify_failed'
+                    $waError = "send_log.json has no live run for $Today - module 02 did not send"
+                    throw 'verify'
+                }
+                $sendDate = $Today
+                # Aggregate across the day's rows: on a retry the newest row can legitimately show sent=0
+                # because attempt 1 already delivered.
+                $sentCount = Sum-Field $todayRuns 'sent'; $failedCount = Sum-Field $todayRuns 'failed'
+                $skippedCount = Sum-Field $todayRuns 'skipped'
+            }
+            $verify.send_log_date = $sendDate; $verify.sent = $sentCount; $verify.failed = $failedCount; $verify.skipped = $skippedCount
+
+            # R9 - a run where nobody was due is a success, not a failure
+            if (-not $moduleOneOnly -and $Mode -eq 'live' -and $sentCount -eq 0 -and $failedCount -eq 0) { $waStatus = 'ok_nothing_to_send' }
+            else { $waStatus = 'ok' }
+        }
+        catch {
+            if ($waStatus -eq 'ok') { $waStatus = 'claude_failed'; $waError = "$_" }
+        }
     }
 
     # R24: did module 02 record the trigger label we asked for? A label, never a delivery: a warning only.
     $waRowsMode = Read-TodayRuns $SendLog $Mode
-    if (-not $skipWhatsApp -and $waStatus -in @('ok', 'ok_nothing_to_send') -and $waRowsMode.Count -gt 0) {
+    if (-not $moduleOneOnly -and $waStatus -in @('ok', 'ok_nothing_to_send') -and $waRowsMode.Count -gt 0) {
         if ([string]$waRowsMode[0].trigger -ne $ModuleTrigger) { $warnings += 'whatsapp trigger label missing' }
     }
 
@@ -460,6 +556,13 @@ try {
     $todoToday = (Test-Path $TodoJson) -and ((Get-Item $TodoJson).LastWriteTime.ToString('yyyy-MM-dd') -eq $Today)
     if (-not $SchedEmail) {
         $emailDetail = 'switched off (SCHED_EMAIL=0)'
+    }
+    elseif ($RunKind -eq 'whatsapp') {
+        # v3.0 (R27): email has its own run; this one never starts send_email.py.
+        $emailDetail = if ($SplitEmail) { "runs separately at $EmailTimeStr" } else { 'not part of this run (-Channel whatsapp)' }
+    }
+    elseif ($RunKind -eq 'email' -and $waStatus -notin @('ok', 'ok_nothing_to_send')) {
+        $emailStatus = 'failed'; $emailDetail = "today's list could not be rebuilt ($waStatus) - nothing was sent"
     }
     elseif ($emailPreflightBad.Count -gt 0) {
         $emailStatus = 'preflight_failed'; $emailDetail = $emailPreflightBad -join "`n"
@@ -516,10 +619,12 @@ try {
     }
 
     # 4b ------------------------------------------------------ channels, status precedence, warnings (R9, R22, R23)
-    $waChanStatus = if ($skipWhatsApp) { 'preflight_failed' }
+    $waChanStatus = if ($RunKind -eq 'email') { 'skipped' }
+                    elseif ($skipWhatsApp) { 'preflight_failed' }
                     elseif ($waStatus -in @('ok', 'ok_nothing_to_send')) { $waStatus }
                     else { 'failed' }
-    $waDetail = if ($skipWhatsApp) { $waPreflightBad -join "`n" }
+    $waDetail = if ($RunKind -eq 'email') { "runs at $SchedTimeStr" }
+                elseif ($skipWhatsApp) { $waPreflightBad -join "`n" }
                 elseif ($waChanStatus -eq 'failed') { "$waStatus" }
                 elseif ($waChanStatus -eq 'ok') { "sent $($verify.sent)" } else { 'nobody due' }
     $chan.whatsapp = @{ status = $waChanStatus; detail = $waDetail }
@@ -529,18 +634,30 @@ try {
     elseif ($skipWhatsApp)                    { $status = 'whatsapp_preflight_failed'; $errorText = $waPreflightBad -join "`n" }
     elseif ($emailStatus -eq 'preflight_failed') { $status = 'email_preflight_failed'; $errorText = $emailDetail }
     elseif ($emailStatus -eq 'failed')        { $status = 'email_failed'; $errorText = $emailDetail }
-    elseif ($waChanStatus -in @('ok_nothing_to_send') -and $emailStatus -in @('ok_nothing_to_send', 'skipped')) { $status = 'ok_nothing_to_send' }
+    elseif ($waChanStatus -in @('ok_nothing_to_send', 'skipped') -and $emailStatus -in @('ok_nothing_to_send', 'skipped')) { $status = 'ok_nothing_to_send' }
     else { $status = 'ok' }
 
-    # R23: delivery warnings, summed over today's rows for this mode. Reported, never failed.
-    $waRows = Read-TodayRuns $SendLog $Mode
-    $emRows = Read-TodayRuns $EmailLog $Mode
+    # R23: delivery warnings, summed over today's rows for this mode. Reported, never failed. v3.0: each
+    # run reports only the channel(s) it delivered, so the 13:30 run does not repeat the 10:00 warnings.
+    $waRows = if ($RunKind -ne 'email') { Read-TodayRuns $SendLog $Mode } else { @() }
+    $emRows = if ($RunKind -ne 'whatsapp') { Read-TodayRuns $EmailLog $Mode } else { @() }
     $n = Sum-Field $waRows 'not_delivered'; if ($n -gt 0) { $warnings += "$n WhatsApp message(s) not confirmed delivered" }
     $n = Sum-Field $waRows 'unconfirmed';   if ($n -gt 0) { $warnings += "$n WhatsApp message(s) unconfirmed - check the chat" }
     $n = Sum-Field $emRows 'unconfirmed';   if ($n -gt 0) { $warnings += "$n email(s) unconfirmed - check Sent Items" }
     $n = Sum-Field $emRows 'bounced';       if ($n -gt 0) { $warnings += "$n email(s) bounced - check the address" }
     $n = Sum-Field $emRows 'queued';        if ($n -gt 0) { $warnings += "$n email(s) still in the Outbox" }
     $n = Sum-Field $emRows 'invalid_address'; if ($n -gt 0) { $warnings += "$n email contact(s) with an invalid address" }
+    # v3.0 (R32): the 10:00 run no longer mails, so a missing email task or a bad email time must be said.
+    if ($SchedEmail -and $EmailTimeBad -and $RunKind -ne 'email') {
+        $warnings += "SCHED_EMAIL_TIME '$EmailTimeStr' is not a usable time - email was sent in this run instead"
+    }
+    if ($SchedEmail -and $RunKind -eq 'whatsapp' -and $SplitEmail) {
+        $emailTask = if ($env:SCHED_EMAIL_TASK) { $env:SCHED_EMAIL_TASK } else { 'ToDo-Email-Daily' }
+        $emailTaskObj = Get-ScheduledTask -TaskName $emailTask -ErrorAction SilentlyContinue
+        if (-not $emailTaskObj -or $emailTaskObj.State -eq 'Disabled') {
+            $warnings += 'email task not installed - email will not be sent; run install_task.ps1'
+        }
+    }
     if ($warnings.Count -gt 0 -and $status -in @('ok', 'ok_nothing_to_send')) {
         $alerts = Send-Alert 'ToDo scheduler: delivery warnings' ($warnings -join "`n") -Only @('toast')
     }
@@ -555,7 +672,8 @@ finally {
     $isFailure = $status -notin @('ok', 'ok_nothing_to_send', 'skipped_locked')
     if ($isFailure -and (-not $IsScheduled -or $attempt -ge $MaxAttempts)) {
         $chanLine = "whatsapp: $($chan.whatsapp.status); email: $($chan.email.status)"
-        $alerts = Send-Alert "ToDo scheduler failed: $status" `
+        $kindLabel = if ($RunKind -eq 'all') { '' } else { " ($RunKind run)" }
+        $alerts = Send-Alert "ToDo scheduler$kindLabel failed: $status" `
                              "Attempt $attempt of $MaxAttempts on $Today ($EffectiveTrigger).`n$chanLine`n`n$errorText"
     }
     elseif ($isFailure) {
@@ -566,7 +684,7 @@ finally {
     Save-Run @{
         date = $Today; started_at = $Started.ToString('o'); finished_at = $finished.ToString('o')
         duration_s = [int]($finished - $Started).TotalSeconds
-        trigger = $EffectiveTrigger; launch_event = $LaunchEvent; attempt = $attempt; status = $status
+        trigger = $EffectiveTrigger; run_kind = $RunKind; launch_event = $LaunchEvent; attempt = $attempt; status = $status
         preflight = $preflight; claude = $claudeInfo; verify = $verify
         channels = $chan; warnings = @($warnings)
         # Both halves are recorded: a channel that failed is as diagnostic as one that fired,
@@ -579,7 +697,7 @@ finally {
     # 7 ------------------------------------------------------- unlock, always (R2)
     if ($lockTaken) { Remove-Item $LockFile -Force -ErrorAction SilentlyContinue }
 
-    $line = "[$status] $Today attempt $attempt ($EffectiveTrigger) in $([int]($finished - $Started).TotalSeconds)s  whatsapp=$($chan.whatsapp.status) email=$($chan.email.status)"
+    $line = "[$status] $Today $RunKind run, attempt $attempt ($EffectiveTrigger) in $([int]($finished - $Started).TotalSeconds)s  whatsapp=$($chan.whatsapp.status) email=$($chan.email.status)"
     if ($errorText) { $line += "`n$errorText" }
     Write-Host $line
     if ($ShowWindow -and -not $isFailure) { Write-Host 'run finished' }
@@ -598,7 +716,7 @@ if ($status -in @('ok', 'ok_nothing_to_send', 'skipped_locked')) { exit 0 }
 if ($IsScheduled -and $attempt -lt $MaxAttempts) {
     Write-Host "attempt $attempt failed - waiting $RetryWaitSec seconds, then attempt $($attempt + 1)"
     Start-Sleep -Seconds $RetryWaitSec
-    & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -Trigger schedule -ContinueFrom $EffectiveTrigger
+    & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -Trigger schedule -ContinueFrom $EffectiveTrigger -Channel $RunKind
     exit $LASTEXITCODE
 }
 exit 1
