@@ -1,0 +1,10 @@
+  <div><b>Last run</b>
+    {% if strip.last_run %}
+      {{ strip.last_run.when }} &middot; {{ strip.last_run.trigger }}{% if strip.last_run.kind %} ({{ strip.last_run.kind }}){% endif %} &middot; <span class="pill {{ 'ok' if strip.last_run.status.startswith('ok') else 'bad' }}">{{ strip.last_run.status }}</span>
+      <small>WhatsApp: {{ strip.last_run.whatsapp or '-' }} &middot; Email: {{ strip.last_run.email or '-' }}</small>
+      {% for w in strip.last_run.warnings %}<small class="warnline">&#9888; {{ w }}</small>{% endfor %}
+    {% else %}none yet{% endif %}
+  </div>
+  <div><b>Scheduled email</b> <span class="pill {{ 'ok' if strip.sched_email else 'mute' }}">{{ 'ON' if strip.sched_email else 'OFF' }}</span><small>read-only</small></div>
+  <div><b>Next run</b> {{ strip.next_run }}</div>
+  <div><b>Scheduler lock</b> {% if strip.lock %}<span class="pill amber">held by {{ strip.lock.who }}{% if strip.lock.since %} since {{ strip.lock.since }}{% endif %}</span>{% else %}<span class="pill ok">free</span>{% endif %}</div>

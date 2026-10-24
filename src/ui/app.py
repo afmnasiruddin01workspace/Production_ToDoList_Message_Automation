@@ -213,6 +213,27 @@ def sched_time():
         return 10, 0
 
 
+def email_time():
+    """Module 03 v3.0's SCHED_EMAIL_TIME as (h, m), or None for `off` / unusable / equal to SCHED_TIME (R25)."""
+    raw = sched_setting("SCHED_EMAIL_TIME", "13:30")
+    if raw == "off":
+        return None
+    try:
+        hh, mm = raw.split(":")
+        t = (int(hh), int(mm))
+        if not (0 <= t[0] < 24 and 0 <= t[1] < 60) or t == sched_time():
+            return None
+        return t
+    except ValueError:
+        return None
+
+
+def next_at(hm):
+    n = now()
+    nxt = n.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+    return nxt + timedelta(days=1) if nxt <= n else nxt
+
+
 def guard_reason():
     """R10: refuse a lock-taking job when holding the lock could make the scheduled run skip the day."""
     hh, mm = sched_time()
@@ -357,18 +378,24 @@ def status_strip():
         r = runs[0]
         ch = r.get("channels") or {}
         last = {"when": scrub(str(r.get("started_at", ""))[:16].replace("T", " ")), "trigger": scrub(r.get("trigger", "")),
+                "kind": scrub(r.get("run_kind", "")) + " run" if r.get("run_kind") in ("email", "whatsapp") else "",
                 "status": scrub(r.get("status", "")),
                 "whatsapp": scrub((ch.get("whatsapp") or {}).get("status", "")),
                 "email": scrub((ch.get("email") or {}).get("status", "")),
                 "warnings": [scrub(w) for w in (r.get("warnings") or [])][:5]}
-    hh, mm = sched_time()
-    n = now()
-    nxt = n.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    if nxt <= n:
-        nxt += timedelta(days=1)
+    fmt = "%a %d %b %H:%M"
+    sched_email = sched_setting("SCHED_EMAIL", "1") != "0"
+    et = email_time()
+    wa_next = next_at(sched_time()).strftime(fmt)
+    if not sched_email:
+        next_run = f"WhatsApp {wa_next} · Email off"
+    elif et:
+        next_run = f"WhatsApp {wa_next} · Email {next_at(et).strftime(fmt)}"
+    else:
+        next_run = f"WhatsApp {wa_next} · Email with the {sched_time()[0]:02d}:{sched_time()[1]:02d} run"
     lk = lock_info()
-    return {"last_run": last, "sched_email": sched_setting("SCHED_EMAIL", "1") != "0",
-            "next_run": nxt.strftime("%a %d %b %H:%M"),
+    return {"last_run": last, "sched_email": sched_email,
+            "next_run": next_run,
             "lock": ({"who": lk["who"], "since": lk["started"]} if lk else None)}
 
 
@@ -819,7 +846,8 @@ def index():
 
 @app.route("/api/state")
 def api_state():
-    return jsonify(table=build_table(), strip=status_strip())
+    strip = status_strip()
+    return jsonify(table=build_table(), strip=strip, strip_html=render_template("_strip.html", strip=strip))
 
 
 @app.route("/api/preview")

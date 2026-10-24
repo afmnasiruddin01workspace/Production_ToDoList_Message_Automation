@@ -105,7 +105,7 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | Refuses to start | `EMAIL_MODE` missing or misspelled | stderr | Set it to `dry-run`, `self` or `live` in `.secrets/email.env` |
 
 ## 05-manual-ui
-**v1.0: the local manual-send page** - see `plan/stableMD/05-manual-ui.stable.md` section 12 for the full table.
+**v1.1: the local manual-send page** - see `plan/stableMD/05-manual-ui.stable.md` section 12 for the full table.
 
 | Symptom | Likely cause | How to check | Fix |
 |---|---|---|---|
@@ -121,6 +121,7 @@ When a new failure type appears: write an incident (`docs/incidents/`), add a ro
 | A manual WhatsApp send fails with "browser already running" | A terminal run of module 02 holds the Chrome profile | the job's output | Close the other run; use the UI or the scheduler for WhatsApp |
 | The Log shows old rows with no delivery column | `legacy` rows from before 2026-10-19 | the `source` column | Expected: those sends predate delivery receipts |
 | Email shows `queued` | Outlook was offline | the Log | It sends when Outlook reconnects; do not resend |
+| The strip says 'held by this UI' though no job runs, or the page reloaded by itself | Page from before v1.1 (strip never refreshed), or a Rebuild list just finished (the reload is intended, v1.1) | the lock file; the job box | Reload; v1.1 refreshes the strip within 60 s |
 | Times look 6 hours off | (fixed in v1.0) module 02 stores UTC | - | Update; the UI converts to Asia/Dhaka |
 
 ## Git / Repository

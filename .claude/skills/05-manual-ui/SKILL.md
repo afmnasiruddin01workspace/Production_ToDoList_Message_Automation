@@ -5,7 +5,7 @@ description: A local web page (127.0.0.1 only) to send the to-do list by hand ov
 
 # 05 - Manual Send UI
 
-Source of truth: `plan/stableMD/05-manual-ui.stable.md` (v1.0). This skill is a summary of its section 7 - if they ever disagree, the stable plan wins and this file needs updating.
+Source of truth: `plan/stableMD/05-manual-ui.stable.md` (v1.1). This skill is a summary of its section 7 - if they ever disagree, the stable plan wins and this file needs updating.
 
 ## When to use
 When the 10:00 run is not what you need: a late task someone must hear about now, a message that never arrived, a correction after fixing an address, or a test before trusting a change. The normal day is still module 03's scheduled run.
@@ -23,6 +23,11 @@ When the 10:00 run is not what you need: a late task someone must hear about now
 5. **Rebuild list** (if the list is not from today, send is disabled) runs a headless Claude session for module 01 only; the confirm states the cost (about $0.2-0.3, 1-2 minutes).
 6. **Refresh email receipts** runs `send_email.py --reconcile` to find bounces. There is no WhatsApp equivalent: module 02 only sees a receipt while its browser is connected.
 7. **Log page** merges the shared delivery ledger with older WhatsApp rows from module 02's own log (`legacy`, no delivery receipt), with filters, colours and CSV export. The default hides `skipped_*` rows.
+
+## What v1.1 changed (display only, R23-R25)
+- A new job starts with an empty result area (no previous job's rows while it runs).
+- The status strip refreshes when a job ends and every 60 s while idle; after a successful Rebuild list the page reloads itself (mode back to `dry-run`).
+- The strip shows both scheduled runs (`WhatsApp ... 10:00 - Email ... 13:30`, or `Email with the 10:00 run` / `Email off`) and the heading is "Last run" with the run kind. The UI's 10:00 guard is not extended to 13:30: module 03's email run waits for the lock.
 
 ## Safety rules the UI enforces (do not weaken them)
 - Loopback only (`127.0.0.1`), forged `Host` -> 400, an in-memory token in an HttpOnly SameSite=Strict cookie, same-origin check on every POST, nothing happens on a GET. A page that can send real messages must be safe from other websites in your browser.

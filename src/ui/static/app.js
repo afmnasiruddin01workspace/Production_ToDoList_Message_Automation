@@ -32,6 +32,16 @@
     });
   });
 
+  // ---- status strip kept current (R24): replaced from the server's own template, never built from data here
+  function refreshStrip(then) {
+    fetch("/api/state").then(function (r) { return r.json(); }).then(function (s) {
+      var st = $("#strip"); if (st && s.strip_html != null) { st.innerHTML = s.strip_html; }
+      if (then) then(s);
+    }).catch(function () {});
+  }
+  var stripTimer = setInterval(function () { if (!document.hidden && !jobRunning) refreshStrip(); }, 60000);
+  var jobRunning = false;
+
   if (!$("#confirm")) { return; }  // the Log page has no send controls
 
   // ---- confirm dialog
@@ -94,16 +104,24 @@
   });
 
   // ---- job progress (R12)
-  var timer = null;
+  var timer = null, shownId = null, watching = false;
+  // R23: a new job always starts from an empty result area
+  function resetJob() {
+    var t = $("#outcome"); if (t) { $("tbody", t).textContent = ""; t.hidden = true; }
+    $("#jobmsg").textContent = ""; $("#joblines").textContent = ""; $("#jobstep").textContent = "";
+  }
   function showError(msg) {
     var b = $("#jobbox"); if (!b) return;
+    resetJob(); shownId = null;
     b.hidden = false; $("#jobstate").textContent = "refused"; $("#jobstate").className = "pill bad";
     $("#jobstep").textContent = ""; $("#jobmsg").textContent = msg; $("#joblines").textContent = ""; $("#outcome").hidden = true;
   }
-  function watch() { if (timer) clearInterval(timer); poll(); timer = setInterval(poll, 1000); }
+  function watch() { watching = true; resetJob(); shownId = null; jobRunning = true; if (timer) clearInterval(timer); poll(); timer = setInterval(poll, 1000); }
   function poll() {
     fetch("/api/job").then(function (r) { return r.json(); }).then(function (j) {
       if (j.state === "idle") return;
+      if (j.id !== shownId) { resetJob(); shownId = j.id; }
+      jobRunning = j.state === "running";
       $("#jobbox").hidden = false;
       var st = $("#jobstate"); st.textContent = j.state; st.className = "pill " + (j.state === "done" ? "ok" : j.state === "failed" ? "bad" : "amber");
       $("#jobstep").textContent = j.step || "";
@@ -122,7 +140,10 @@
         (j.steps || []).forEach(function (s) {
           if (s.status !== "ok") { msg.appendChild(el("p", s.channel + " failed: " + s.message + " — see " + s.help + " (exit " + s.exit + ")", "banner bad")); }
         });
-        fetch("/api/state").then(function (r) { return r.json(); }).then(refreshStates);
+        refreshStrip(refreshStates);
+        // R24: after a Rebuild this page finished watching, reload so the list line, banner and controls are current
+        if (watching && j.kind === "rebuild" && j.state === "done") { watching = false; setTimeout(function () { location.reload(); }, 800); }
+        watching = false;
       }
     });
   }
